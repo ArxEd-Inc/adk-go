@@ -6,7 +6,7 @@ require (
 	cloud.google.com/go v0.123.0
 	cloud.google.com/go/aiplatform v1.105.0
 	cloud.google.com/go/storage v1.56.1
-	github.com/a2aproject/a2a-go v0.3.10
+	github.com/a2aproject/a2a-go v0.3.13
 	github.com/awalterschulze/gographviz v2.0.3+incompatible
 	github.com/glebarez/sqlite v1.8.0
 	github.com/google/go-cmp v0.7.0
@@ -35,6 +35,8 @@ require (
 	rsc.io/omap v1.2.0
 	rsc.io/ordered v1.1.1
 )
+
+require github.com/hashicorp/golang-lru/v2 v2.0.7
 
 require (
 	cel.dev/expr v0.25.1 // indirect
