@@ -16,6 +16,9 @@ package vertexai
 
 import (
 	"testing"
+
+	aiplatformpb "cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
+	"google.golang.org/adk/session"
 )
 
 func TestGetReasoningEngineID(t *testing.T) {
@@ -98,5 +101,48 @@ func TestGetReasoningEngineID(t *testing.T) {
 				t.Errorf("getReasoningEngineID() got = %v, want %v", got, tt.expectedID)
 			}
 		})
+	}
+}
+
+func TestCreateAiplatformpbActionsPreservesArtifactDelta(t *testing.T) {
+	event := &session.Event{
+		Actions: session.EventActions{
+			ArtifactDelta: map[string]int64{"chart.html": 3, "report.pdf": 1},
+		},
+	}
+
+	actions, err := createAiplatformpbActions(event)
+	if err != nil {
+		t.Fatalf("createAiplatformpbActions() error = %v", err)
+	}
+	if actions == nil {
+		t.Fatal("createAiplatformpbActions() returned nil, want populated actions")
+	}
+	if got, want := len(actions.ArtifactDelta), 2; got != want {
+		t.Fatalf("len(ArtifactDelta) = %d, want %d", got, want)
+	}
+	if got, want := actions.ArtifactDelta["chart.html"], int32(3); got != want {
+		t.Errorf("ArtifactDelta[chart.html] = %d, want %d", got, want)
+	}
+	if got, want := actions.ArtifactDelta["report.pdf"], int32(1); got != want {
+		t.Errorf("ArtifactDelta[report.pdf] = %d, want %d", got, want)
+	}
+}
+
+func TestAiplatformToActionsPreservesArtifactDelta(t *testing.T) {
+	actions := aiplatformToActions(&aiplatformpb.SessionEvent{
+		Actions: &aiplatformpb.EventActions{
+			ArtifactDelta: map[string]int32{"chart.html": 3, "report.pdf": 1},
+		},
+	})
+
+	if got, want := len(actions.ArtifactDelta), 2; got != want {
+		t.Fatalf("len(ArtifactDelta) = %d, want %d", got, want)
+	}
+	if got, want := actions.ArtifactDelta["chart.html"], int64(3); got != want {
+		t.Errorf("ArtifactDelta[chart.html] = %d, want %d", got, want)
+	}
+	if got, want := actions.ArtifactDelta["report.pdf"], int64(1); got != want {
+		t.Errorf("ArtifactDelta[report.pdf] = %d, want %d", got, want)
 	}
 }

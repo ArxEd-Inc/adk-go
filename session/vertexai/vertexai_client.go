@@ -238,14 +238,9 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID str
 		return err
 	}
 
-	var eventState *aiplatformpb.EventActions
-	// Convert and set the initial state if provided
-	if len(event.Actions.StateDelta) > 0 {
-		sessionState, err := structpb.NewStruct(event.Actions.StateDelta)
-		if err != nil {
-			return fmt.Errorf("failed to convert state to structpb: %w", err)
-		}
-		eventState = &aiplatformpb.EventActions{StateDelta: sessionState}
+	actions, err := createAiplatformpbActions(event)
+	if err != nil {
+		return fmt.Errorf("error creating actions: %w", err)
 	}
 
 	content, err := createAiplatformpbContent(event)
@@ -268,7 +263,7 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID str
 			Author:        event.Author,
 			InvocationId:  event.InvocationID,
 			Content:       content,
-			Actions:       eventState,
+			Actions:       actions,
 			EventMetadata: metadata,
 			ErrorCode:     event.ErrorCode,
 			ErrorMessage:  event.ErrorMessage,
@@ -314,9 +309,7 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 			Timestamp:    rpcResp.Timestamp.AsTime(),
 			InvocationID: rpcResp.InvocationId,
 			Author:       rpcResp.Author,
-			Actions: session.EventActions{
-				StateDelta: filterNilValues(rpcResp.Actions.StateDelta.AsMap()),
-			},
+			Actions:      aiplatformToActions(rpcResp),
 			LLMResponse: model.LLMResponse{
 				Content:      content,
 				ErrorCode:    rpcResp.ErrorCode,
@@ -463,6 +456,20 @@ func aiplatformToGenaiContent(rpcResp *aiplatformpb.SessionEvent) *genai.Content
 		}
 	}
 	return content
+}
+
+func aiplatformToActions(rpcResp *aiplatformpb.SessionEvent) session.EventActions {
+	actions := session.EventActions{
+		StateDelta: filterNilValues(rpcResp.Actions.StateDelta.AsMap()),
+	}
+	if len(rpcResp.Actions.ArtifactDelta) > 0 {
+		artifactDelta := make(map[string]int64, len(rpcResp.Actions.ArtifactDelta))
+		for name, version := range rpcResp.Actions.ArtifactDelta {
+			artifactDelta[name] = int64(version)
+		}
+		actions.ArtifactDelta = artifactDelta
+	}
+	return actions
 }
 
 func createAiplatformpbContent(event *session.Event) (*aiplatformpb.Content, error) {
@@ -645,6 +652,28 @@ func createAiplatformpbMetadata(event *session.Event) (*aiplatformpb.EventMetada
 		metadata.GroundingMetadata.GroundingSupports = groundingSupports
 	}
 	return metadata, nil
+}
+
+func createAiplatformpbActions(event *session.Event) (*aiplatformpb.EventActions, error) {
+	if len(event.Actions.StateDelta) == 0 && len(event.Actions.ArtifactDelta) == 0 {
+		return nil, nil
+	}
+	actions := &aiplatformpb.EventActions{}
+	if len(event.Actions.StateDelta) > 0 {
+		stateDelta, err := structpb.NewStruct(event.Actions.StateDelta)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert state to structpb: %w", err)
+		}
+		actions.StateDelta = stateDelta
+	}
+	if len(event.Actions.ArtifactDelta) > 0 {
+		artifactDelta := make(map[string]int32, len(event.Actions.ArtifactDelta))
+		for name, version := range event.Actions.ArtifactDelta {
+			artifactDelta[name] = int32(version)
+		}
+		actions.ArtifactDelta = artifactDelta
+	}
+	return actions, nil
 }
 
 func createGroundingMetadata(metadata *aiplatformpb.GroundingMetadata) *genai.GroundingMetadata {
