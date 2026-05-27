@@ -309,6 +309,46 @@ func TestContentsRequestProcessor(t *testing.T) {
 			},
 		},
 		{
+			name: "ExcludeToolConfirmation",
+			events: []*session.Event{
+				{
+					Author: "AgentA",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{
+									FunctionCall: &genai.FunctionCall{
+										ID:   "call_confirm_123",
+										Name: "adk_request_confirmation",
+										Args: map[string]any{"message": "Confirm delete?"},
+									},
+								},
+							},
+						},
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "user",
+							Parts: []*genai.Part{
+								{
+									FunctionResponse: &genai.FunctionResponse{
+										ID:       "call_confirm_123",
+										Name:     "adk_request_confirmation",
+										Response: map[string]any{"confirmed": true},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: nil,
+		},
+		{
 			name:   "FilterByBranch",
 			branch: "branch1.task1",
 			events: []*session.Event{
@@ -377,6 +417,46 @@ func TestContentsRequestProcessor(t *testing.T) {
 				{Author: "user"},
 			},
 			want: nil,
+		},
+		{
+			name: "TranscriptionAggregation",
+			events: []*session.Event{
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						InputTranscription: &genai.Transcription{Text: "hello ", Finished: false},
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						InputTranscription: &genai.Transcription{Text: "world", Finished: true},
+					},
+				},
+				{
+					Author: "testAgent",
+					LLMResponse: model.LLMResponse{
+						OutputTranscription: &genai.Transcription{Text: "hi ", Finished: false},
+					},
+				},
+				{
+					Author: "testAgent",
+					LLMResponse: model.LLMResponse{
+						OutputTranscription: &genai.Transcription{Text: "there", Finished: true},
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						InputTranscription: &genai.Transcription{Text: "ok", Finished: true},
+					},
+				},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("hello world", "user"),
+				genai.NewContentFromText("hi there", "model"),
+				genai.NewContentFromText("ok", "user"),
+			},
 		},
 	}
 
