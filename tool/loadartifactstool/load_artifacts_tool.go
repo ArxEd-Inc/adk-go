@@ -109,12 +109,8 @@ func (t *artifactsTool) Run(ctx tool.Context, args any) (map[string]any, error) 
 			artifactNames = []string{}
 		}
 	}
-	anyNames := make([]any, len(artifactNames))
-	for i, name := range artifactNames {
-		anyNames[i] = name
-	}
 	result := map[string]any{
-		"artifact_names": anyNames,
+		"artifact_names": artifactNames,
 	}
 	return result, nil
 }
@@ -177,21 +173,9 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx tool.Context, req *
 	if !ok {
 		return nil
 	}
-	var artifactNames []string
-	switch names := artifactNamesRaw.(type) {
-	case []string:
-		artifactNames = names
-	case []any:
-		artifactNames = make([]string, len(names))
-		for i, name := range names {
-			s, ok := name.(string)
-			if !ok {
-				return fmt.Errorf("invalid artifact name type at index %d: %T, expected string", i, name)
-			}
-			artifactNames[i] = s
-		}
-	default:
-		return fmt.Errorf("invalid artifact names type: %T, expected []string or []any", artifactNamesRaw)
+	artifactNames, ok := artifactNamesRaw.([]string)
+	if !ok {
+		return fmt.Errorf("invalid artifact names type: %T, expected []string", artifactNamesRaw)
 	}
 	if len(artifactNames) == 0 {
 		return nil
