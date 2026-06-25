@@ -16,6 +16,7 @@ package converters
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -100,6 +101,72 @@ func TestPartToContentBlockEmptyTextThought(t *testing.T) {
 	}
 	if want := base64.StdEncoding.EncodeToString(sig); block.OfThinking.Signature != want {
 		t.Fatalf("signature = %q, want %q", block.OfThinking.Signature, want)
+	}
+}
+
+// TestFunctionDeclarationToToolResolvesRootRef verifies that a tool whose parameter schema is a
+// root $ref into $defs (a common shape for schemas generated from typed request objects) is
+// converted so the referenced object's properties and required fields appear at the top level, and
+// $defs is carried through so nested $refs still resolve. Before this, the converter read only the
+// empty root properties and sent Anthropic a parameterless tool.
+func TestFunctionDeclarationToToolResolvesRootRef(t *testing.T) {
+	fd := &genai.FunctionDeclaration{
+		Name:        "searchBooks",
+		Description: "searches books",
+		ParametersJsonSchema: map[string]any{
+			"$ref": "#/$defs/SearchBooksRequest",
+			"$defs": map[string]any{
+				"SearchBooksRequest": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"limit":          map[string]any{"type": "integer"},
+						"include_ebooks": map[string]any{"type": "boolean"},
+						"genres": map[string]any{
+							"type":  "array",
+							"items": map[string]any{"$ref": "#/$defs/Genre"},
+						},
+					},
+					"required": []any{"limit", "include_ebooks"},
+				},
+				"Genre": map[string]any{"type": "string", "enum": []any{"GENRE_FICTION"}},
+			},
+		},
+	}
+
+	tool := FunctionDeclarationToTool(fd)
+	if tool.OfTool == nil {
+		t.Fatal("OfTool is nil")
+	}
+	input := tool.OfTool.InputSchema
+
+	properties, ok := input.Properties.(map[string]any)
+	if !ok {
+		t.Fatalf("input_schema.properties is %T, want map[string]any", input.Properties)
+	}
+	for _, name := range []string{"limit", "include_ebooks", "genres"} {
+		if _, ok := properties[name]; !ok {
+			t.Errorf("input_schema.properties missing %q", name)
+		}
+	}
+	if len(input.Required) != 2 {
+		t.Errorf("input_schema.required = %v, want the two required fields", input.Required)
+	}
+
+	// $defs must survive (so the nested $ref resolves on Anthropic's side) and the root $ref must be
+	// inlined (Anthropic requires a concrete object at the top level).
+	data, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("marshal input schema: %v", err)
+	}
+	var marshalled map[string]any
+	if err := json.Unmarshal(data, &marshalled); err != nil {
+		t.Fatalf("unmarshal input schema: %v", err)
+	}
+	if _, ok := marshalled["$defs"]; !ok {
+		t.Errorf("$defs not carried into input_schema: %s", data)
+	}
+	if _, ok := marshalled["$ref"]; ok {
+		t.Errorf("root $ref was not inlined: %s", data)
 	}
 }
 

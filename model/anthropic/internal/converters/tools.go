@@ -18,11 +18,11 @@
 package converters
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 )
 
@@ -48,55 +48,96 @@ func ToolsToAnthropicTools(tools []*genai.Tool) []anthropic.ToolUnionParam {
 	return result
 }
 
-// extractFunctionParams extracts properties and required fields from a FunctionDeclaration.
-// Parameters takes precedence over ParametersJsonSchema.
-// ParametersJsonSchema currently supports:
-//   - map[string]any with "properties" and "required" keys
-//   - *jsonschema.Schema
-//
-// Other ParametersJsonSchema types are ignored.
-func extractFunctionParams(fd *genai.FunctionDeclaration) (properties map[string]any, required []string) {
-	properties = map[string]any{}
-
-	if fd.Parameters != nil {
-		if props := schemaPropertiesToMap(fd.Parameters.Properties); props != nil {
-			properties = props
-		}
-		required = fd.Parameters.Required
-	} else if fd.ParametersJsonSchema != nil {
-		switch schema := fd.ParametersJsonSchema.(type) {
-		case map[string]any:
-			if props, ok := schema["properties"].(map[string]any); ok {
-				properties = props
-			}
-			required = extractRequiredFields(schema["required"])
-		case *jsonschema.Schema:
-			if props := jsonSchemaToProperties(schema); props != nil {
-				properties = props
-			}
-			if len(schema.Required) > 0 {
-				required = schema.Required
-			}
-		}
-	}
-
-	return properties, required
-}
-
 // FunctionDeclarationToTool converts a genai FunctionDeclaration to an Anthropic ToolUnionParam.
 func FunctionDeclarationToTool(fd *genai.FunctionDeclaration) anthropic.ToolUnionParam {
-	properties, required := extractFunctionParams(fd)
-
 	return anthropic.ToolUnionParam{
 		OfTool: &anthropic.ToolParam{
 			Name:        fd.Name,
 			Description: anthropic.String(fd.Description),
-			InputSchema: anthropic.ToolInputSchemaParam{
-				Properties: properties,
-				Required:   required,
-			},
+			InputSchema: functionInputSchema(fd),
 		},
 	}
+}
+
+// functionInputSchema builds the Anthropic tool input schema from a FunctionDeclaration. It
+// preserves the full JSON Schema — including $ref and $defs — so nested references still resolve,
+// and inlines a root $ref against $defs so the top level is a concrete object (Anthropic requires
+// input_schema.type to be "object", which a bare $ref isn't). properties and required are surfaced
+// as the SDK's typed fields; any remaining top-level keywords (notably $defs) pass through
+// ExtraFields, which the SDK merges into the marshalled input_schema.
+func functionInputSchema(fd *genai.FunctionDeclaration) anthropic.ToolInputSchemaParam {
+	schema := functionSchemaMap(fd)
+	if schema == nil {
+		return anthropic.ToolInputSchemaParam{Properties: map[string]any{}}
+	}
+
+	if ref, ok := schema["$ref"].(string); ok {
+		if defs, ok := schema["$defs"].(map[string]any); ok {
+			if target := resolveDefRef(ref, defs); target != nil {
+				delete(schema, "$ref")
+				for key, value := range target {
+					schema[key] = value
+				}
+			}
+		}
+	}
+
+	input := anthropic.ToolInputSchemaParam{Properties: map[string]any{}}
+	if properties, ok := schema["properties"].(map[string]any); ok {
+		input.Properties = properties
+	}
+	input.Required = extractRequiredFields(schema["required"])
+
+	// type is fixed to "object" by the SDK and properties/required are set above; carry every other
+	// keyword (e.g. $defs for nested $refs) through so the schema reaches Anthropic intact.
+	var extraFields map[string]any
+	for key, value := range schema {
+		switch key {
+		case "type", "properties", "required":
+		default:
+			if extraFields == nil {
+				extraFields = map[string]any{}
+			}
+			extraFields[key] = value
+		}
+	}
+	input.ExtraFields = extraFields
+
+	return input
+}
+
+// functionSchemaMap returns the FunctionDeclaration's parameter schema as a JSON Schema map. It
+// prefers the structured Parameters; otherwise it round-trips ParametersJsonSchema through JSON so
+// any concrete schema type (e.g. *jsonschema.Schema) yields a faithful map that preserves $ref and
+// $defs. Returns nil when no parameter schema is set.
+func functionSchemaMap(fd *genai.FunctionDeclaration) map[string]any {
+	switch {
+	case fd.Parameters != nil:
+		return SchemaToMap(fd.Parameters)
+	case fd.ParametersJsonSchema != nil:
+		schemaBytes, err := json.Marshal(fd.ParametersJsonSchema)
+		if err != nil {
+			return nil
+		}
+		var schema map[string]any
+		if err := json.Unmarshal(schemaBytes, &schema); err != nil {
+			return nil
+		}
+		return schema
+	default:
+		return nil
+	}
+}
+
+// resolveDefRef returns the schema that a local "#/$defs/<name>" reference points to within defs,
+// or nil if ref isn't such a reference or names a missing definition.
+func resolveDefRef(ref string, defs map[string]any) map[string]any {
+	const defsPrefix = "#/$defs/"
+	if !strings.HasPrefix(ref, defsPrefix) {
+		return nil
+	}
+	target, _ := defs[strings.TrimPrefix(ref, defsPrefix)].(map[string]any)
+	return target
 }
 
 // extractRequiredFields extracts required field names from various input types.
@@ -119,50 +160,6 @@ func extractRequiredFields(v any) []string {
 	default:
 		return nil
 	}
-}
-
-// jsonSchemaToProperties converts a jsonschema.Schema to a properties map.
-// Returns nil if schema or its properties are nil, consistent with schemaPropertiesToMap.
-func jsonSchemaToProperties(schema *jsonschema.Schema) map[string]any {
-	if schema == nil || schema.Properties == nil {
-		return nil
-	}
-
-	props := make(map[string]any)
-	for name, propSchema := range schema.Properties {
-		props[name] = jsonSchemaPropertyToMap(propSchema)
-	}
-	return props
-}
-
-// jsonSchemaPropertyToMap converts a single jsonschema.Schema property to a map.
-func jsonSchemaPropertyToMap(schema *jsonschema.Schema) map[string]any {
-	if schema == nil {
-		return nil
-	}
-
-	result := make(map[string]any)
-
-	if schema.Type != "" {
-		result["type"] = string(schema.Type)
-	}
-	if schema.Description != "" {
-		result["description"] = schema.Description
-	}
-	if len(schema.Enum) > 0 {
-		result["enum"] = schema.Enum
-	}
-	if schema.Items != nil {
-		result["items"] = jsonSchemaPropertyToMap(schema.Items)
-	}
-	if schema.Properties != nil {
-		result["properties"] = jsonSchemaToProperties(schema)
-	}
-	if len(schema.Required) > 0 {
-		result["required"] = schema.Required
-	}
-
-	return result
 }
 
 // schemaPropertiesToMap converts genai Schema properties to a map for Anthropic.
