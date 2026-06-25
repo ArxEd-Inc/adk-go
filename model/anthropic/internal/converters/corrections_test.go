@@ -368,6 +368,104 @@ func TestContentsToMessagesThoughtToolCallRoundTrip(t *testing.T) {
 	}
 }
 
+// TestContentsToMessagesToolCallResultCorrelation verifies that a tool call and its result stay correlated
+// across the two contents they live in (the model's tool_use turn and the following tool_result turn).
+// Anthropic pairs a tool_result to its tool_use solely by id, so the single per-request sanitizer must rewrite
+// both ids to the same value — even when the originating id needs rewriting to Anthropic's shape (here a
+// genai-style id containing spaces). A mismatch here 400s the turn after every tool call.
+func TestContentsToMessagesToolCallResultCorrelation(t *testing.T) {
+	const callID = "function call 1" // contains spaces: invalid for Anthropic, must be sanitized
+	contents := []*genai.Content{
+		{
+			Role:  "model",
+			Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: callID, Name: "lookup", Args: map[string]any{"q": 1}}}},
+		},
+		{
+			Role:  "user",
+			Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: callID, Name: "lookup", Response: map[string]any{"answer": 2}}}},
+		},
+	}
+
+	msgs, err := ContentsToMessages(contents)
+	if err != nil {
+		t.Fatalf("ContentsToMessages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("got %d messages, want [assistant tool_use, user tool_result]", len(msgs))
+	}
+	if msgs[0].Role != anthropic.MessageParamRoleAssistant || msgs[1].Role != anthropic.MessageParamRoleUser {
+		t.Fatalf("roles = [%q, %q], want [assistant, user]", msgs[0].Role, msgs[1].Role)
+	}
+
+	toolUse := msgs[0].Content[0].OfToolUse
+	if toolUse == nil {
+		t.Fatalf("first message block is not a tool_use")
+	}
+	toolResult := msgs[1].Content[0].OfToolResult
+	if toolResult == nil {
+		t.Fatalf("second message block is not a tool_result")
+	}
+	if !toolUseIDPattern.MatchString(toolUse.ID) {
+		t.Errorf("tool_use id %q was not sanitized to Anthropic's shape", toolUse.ID)
+	}
+	if toolResult.ToolUseID != toolUse.ID {
+		t.Errorf("tool_result.tool_use_id = %q, want %q (lost correlation with the tool_use)", toolResult.ToolUseID, toolUse.ID)
+	}
+}
+
+// TestContentsToMessagesParallelToolCallsCorrelate verifies that when the model issues several tool calls in one
+// turn, every result still correlates to its call by id, and that tool_result turns split across consecutive
+// contents are merged into the single user message Anthropic requires (roles must strictly alternate). The results
+// are supplied in the reverse order of the calls to confirm correlation is by id, not position.
+func TestContentsToMessagesParallelToolCallsCorrelate(t *testing.T) {
+	contents := []*genai.Content{
+		{
+			Role: "model",
+			Parts: []*genai.Part{
+				{FunctionCall: &genai.FunctionCall{ID: "toolu_a", Name: "lookup", Args: map[string]any{"q": 1}}},
+				{FunctionCall: &genai.FunctionCall{ID: "toolu_b", Name: "lookup", Args: map[string]any{"q": 2}}},
+			},
+		},
+		{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "toolu_b", Name: "lookup", Response: map[string]any{"answer": 2}}}}},
+		{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "toolu_a", Name: "lookup", Response: map[string]any{"answer": 1}}}}},
+	}
+
+	msgs, err := ContentsToMessages(contents)
+	if err != nil {
+		t.Fatalf("ContentsToMessages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("got %d messages, want [assistant (2 tool_use), user (2 tool_result)]", len(msgs))
+	}
+	if len(msgs[0].Content) != 2 {
+		t.Fatalf("assistant message has %d blocks, want 2 tool_use", len(msgs[0].Content))
+	}
+	if len(msgs[1].Content) != 2 {
+		t.Fatalf("user message has %d blocks, want 2 tool_result (consecutive tool_result turns not merged?)", len(msgs[1].Content))
+	}
+
+	callIDs := map[string]bool{}
+	for _, block := range msgs[0].Content {
+		if block.OfToolUse == nil {
+			t.Fatalf("assistant block is not a tool_use: %+v", block)
+		}
+		callIDs[block.OfToolUse.ID] = true
+	}
+	for _, block := range msgs[1].Content {
+		if block.OfToolResult == nil {
+			t.Fatalf("user block is not a tool_result: %+v", block)
+		}
+		if !callIDs[block.OfToolResult.ToolUseID] {
+			t.Errorf("tool_result id %q has no matching tool_use (correlation lost)", block.OfToolResult.ToolUseID)
+		}
+	}
+	for _, id := range []string{"toolu_a", "toolu_b"} {
+		if !callIDs[id] {
+			t.Errorf("tool_use id %q missing from the assistant message", id)
+		}
+	}
+}
+
 // TestStopReasonToFinishReason covers the refusal mapping (and the common cases).
 func TestStopReasonToFinishReason(t *testing.T) {
 	cases := map[anthropic.StopReason]genai.FinishReason{
