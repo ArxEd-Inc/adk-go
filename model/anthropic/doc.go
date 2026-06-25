@@ -20,11 +20,14 @@
 //
 // It is vendored from github.com/Alcova-AI/adk-anthropic-go (v0.1.18, Apache
 // 2.0) and adapted to the ADK's model/<provider> layout, then corrected for the
-// latest Claude models: thinking is adaptive-only with a per-model effort (there
-// is no legacy budget_tokens path), tool-use IDs are sanitized to Anthropic's
-// required shape, and the refusal stop reason is surfaced. The direct Anthropic
-// API backend is reserved on [Config] but not wired up; only Vertex AI is
-// supported today.
+// latest Claude models and for Vertex AI: thinking is adaptive-only with a
+// per-model effort (there is no legacy budget_tokens path); tool-use IDs are
+// sanitized to Anthropic's required shape; tool input schemas resolve a root
+// $ref and alias over-long top-level property keys; non-streaming requests are
+// issued as streaming internally (Vertex rejects large non-streaming calls); and
+// the refusal stop reason is surfaced. Both the Vertex AI and direct Anthropic
+// API backends are selectable via [Config] (Variant / ANTHROPIC_USE_VERTEX), but
+// only the Vertex AI path is exercised.
 //
 // TODO(#225): replace this package with the upstream
 // google.golang.org/adk/model/anthropic once google/adk-go merges Anthropic

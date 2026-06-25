@@ -17,6 +17,7 @@ package converters
 import (
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -104,6 +105,21 @@ func TestPartToContentBlockEmptyTextThought(t *testing.T) {
 	}
 }
 
+// TestPartToContentBlockUnsignedThoughtDropped verifies that a thought part with no signature (a
+// redacted-thinking marker, or a persisted streaming partial) is dropped on replay rather than
+// re-entering history as assistant text.
+func TestPartToContentBlockUnsignedThoughtDropped(t *testing.T) {
+	part := &genai.Part{Thought: true, Text: "[thinking redacted]"}
+
+	block, err := partToContentBlock(part, newToolUseIDSanitizer())
+	if err != nil {
+		t.Fatalf("partToContentBlock: %v", err)
+	}
+	if block != nil {
+		t.Fatalf("unsigned thought produced a block (%+v); want it dropped", block)
+	}
+}
+
 // TestFunctionDeclarationToToolResolvesRootRef verifies that a tool whose parameter schema is a
 // root $ref into $defs (a common shape for schemas generated from typed request objects) is
 // converted so the referenced object's properties and required fields appear at the top level, and
@@ -133,7 +149,7 @@ func TestFunctionDeclarationToToolResolvesRootRef(t *testing.T) {
 		},
 	}
 
-	tool := FunctionDeclarationToTool(fd)
+	tool := FunctionDeclarationToTool(fd, map[string]string{})
 	if tool.OfTool == nil {
 		t.Fatal("OfTool is nil")
 	}
@@ -167,6 +183,48 @@ func TestFunctionDeclarationToToolResolvesRootRef(t *testing.T) {
 	}
 	if _, ok := marshalled["$ref"]; ok {
 		t.Errorf("root $ref was not inlined: %s", data)
+	}
+}
+
+// TestFunctionDeclarationToToolAliasesLongTopLevelKey verifies that a top-level property key which
+// violates Anthropic's key pattern (here, longer than 64 chars) is aliased to a conforming key, the
+// alias is recorded for restoration, and required entries are mapped to the alias too.
+func TestFunctionDeclarationToToolAliasesLongTopLevelKey(t *testing.T) {
+	longKey := strings.Repeat("field_", 12) // 72 valid chars, over the 64-char limit
+	fd := &genai.FunctionDeclaration{
+		Name: "updateThing",
+		ParametersJsonSchema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{longKey: map[string]any{"type": "string"}},
+			"required":   []any{longKey},
+		},
+	}
+
+	aliases := map[string]string{}
+	tool := FunctionDeclarationToTool(fd, aliases)
+	properties, ok := tool.OfTool.InputSchema.Properties.(map[string]any)
+	if !ok {
+		t.Fatalf("input_schema.properties is %T, want map[string]any", tool.OfTool.InputSchema.Properties)
+	}
+
+	if _, sentVerbatim := properties[longKey]; sentVerbatim {
+		t.Errorf("long key %q sent verbatim; expected an alias", longKey)
+	}
+	if len(properties) != 1 {
+		t.Fatalf("expected exactly one property, got %d", len(properties))
+	}
+	var alias string
+	for key := range properties {
+		alias = key
+	}
+	if len(alias) > 64 || !toolPropertyKeyPattern.MatchString(alias) {
+		t.Errorf("alias %q does not satisfy the 64-char pattern", alias)
+	}
+	if aliases[alias] != longKey {
+		t.Errorf("alias map = %v, want %q -> %q", aliases, alias, longKey)
+	}
+	if got := tool.OfTool.InputSchema.Required; len(got) != 1 || got[0] != alias {
+		t.Errorf("required = %v, want [%q]", got, alias)
 	}
 }
 

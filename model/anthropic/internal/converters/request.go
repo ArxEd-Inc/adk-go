@@ -157,6 +157,14 @@ func partToContentBlock(part *genai.Part, sanitizer *toolUseIDSanitizer) (*anthr
 		return &block, nil
 	}
 
+	// A thought part with no signature can't be replayed as a thinking block (Anthropic requires the
+	// signature) — e.g. a redacted-thinking marker or a persisted streaming partial. Drop it instead
+	// of letting it fall through to the text gate below, which would re-enter the reasoning into
+	// history as assistant text.
+	if part.Thought {
+		return nil, nil
+	}
+
 	// Text content
 	if part.Text != "" {
 		block := anthropic.NewTextBlock(part.Text)
@@ -320,15 +328,29 @@ func functionCallToBlock(call *genai.FunctionCall, sanitizer *toolUseIDSanitizer
 		return nil, nil
 	}
 
-	// Anthropic requires input to be a dictionary - ensure we have a valid map
-	// After JSON round-trip, nil maps stay nil, so we must always provide a valid map
-	var input any = call.Args
+	// Mirror the top-level argument keys to the aliases used in the tool schema, so a replayed
+	// tool_use matches the (aliased) input_schema Anthropic sees this turn. Anthropic also requires
+	// input to be a dictionary, so always provide a valid map.
+	var input any = aliasArgKeys(call.Args)
 	if len(call.Args) == 0 {
 		input = map[string]any{}
 	}
 
 	block := anthropic.NewToolUseBlock(sanitizer.sanitize(call.ID), input, call.Name)
 	return &block, nil
+}
+
+// aliasArgKeys returns args with each top-level key replaced by aliasToolKey(key); keys that don't
+// need aliasing pass through unchanged. Returns nil for empty input.
+func aliasArgKeys(args map[string]any) map[string]any {
+	if len(args) == 0 {
+		return nil
+	}
+	aliased := make(map[string]any, len(args))
+	for key, value := range args {
+		aliased[aliasToolKey(key)] = value
+	}
+	return aliased
 }
 
 // SystemInstructionToSystem converts a genai SystemInstruction to Anthropic system text blocks.

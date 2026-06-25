@@ -26,6 +26,7 @@ import (
 	anthropicsdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/anthropics/anthropic-sdk-go/vertex"
+	"golang.org/x/oauth2/google"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/model"
@@ -89,7 +90,11 @@ func NewModel(ctx context.Context, modelName anthropicsdk.Model, cfg *Config) (m
 			return nil, fmt.Errorf("VertexLocation is required for Vertex AI (set GOOGLE_CLOUD_LOCATION)")
 		}
 
-		client = newVertexClient(ctx, cfg)
+		var err error
+		client, err = newVertexClient(ctx, cfg)
+		if err != nil {
+			return nil, err
+		}
 	default:
 		client = newAPIClient(cfg)
 	}
@@ -130,7 +135,7 @@ func newAPIClient(cfg *Config) anthropicsdk.Client {
 
 // newVertexClient creates a client for Anthropic via Vertex AI.
 // Note: The caller must validate that projectID and region are set before calling this.
-func newVertexClient(ctx context.Context, cfg *Config) anthropicsdk.Client {
+func newVertexClient(ctx context.Context, cfg *Config) (anthropicsdk.Client, error) {
 	projectID := cfg.VertexProjectID
 	if projectID == "" {
 		projectID = os.Getenv("GOOGLE_CLOUD_PROJECT")
@@ -141,9 +146,17 @@ func newVertexClient(ctx context.Context, cfg *Config) anthropicsdk.Client {
 		location = os.Getenv("GOOGLE_CLOUD_LOCATION")
 	}
 
+	// Load Application Default Credentials explicitly rather than via vertex.WithGoogleAuth, which
+	// panics if credentials can't be resolved. Doing it here lets a credential failure — missing or
+	// expired ADC, broken impersonation — surface as a returned error instead of crashing the caller.
+	credentials, err := google.FindDefaultCredentials(ctx, cloudPlatformScope)
+	if err != nil {
+		return anthropicsdk.Client{}, fmt.Errorf("failed to load Google credentials for Vertex AI: %w", err)
+	}
+
 	return anthropicsdk.NewClient(
-		vertex.WithGoogleAuth(ctx, location, projectID, cloudPlatformScope),
-	)
+		vertex.WithCredentials(ctx, location, projectID, credentials),
+	), nil
 }
 
 // Name returns the model name.
@@ -167,28 +180,41 @@ func (m *anthropicModel) GenerateContent(ctx context.Context, req *model.LLMRequ
 
 // generate calls the model synchronously.
 func (m *anthropicModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
-	params, err := m.convertRequest(req)
+	params, toolKeyAliases, err := m.convertRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert request: %w", err)
 	}
 
-	msg, err := m.client.Messages.New(ctx, params)
-	if err != nil {
+	// Accumulate a streaming response rather than calling the non-streaming endpoint. The latter is
+	// rejected ("streaming is required for operations that may take longer than 10 minutes") once
+	// max_tokens is large — which our default is — so a non-streaming caller (e.g. structured-output
+	// extraction) would otherwise fail. Streaming has no such limit and yields the same final message.
+	stream := m.client.Messages.NewStreaming(ctx, params)
+	message := anthropicsdk.Message{}
+	for stream.Next() {
+		if err := message.Accumulate(stream.Current()); err != nil {
+			return nil, fmt.Errorf("failed to accumulate message: %w", err)
+		}
+	}
+	if err := stream.Err(); err != nil {
 		return nil, fmt.Errorf("failed to call model: %w", err)
 	}
 
-	resp, err := converters.MessageToLLMResponse(msg)
+	resp, err := converters.MessageToLLMResponse(&message, toolKeyAliases)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert response: %w", err)
 	}
 
+	// A non-streaming response is the whole turn, so mark it complete — matching
+	// the final response yielded by generateStream.
+	resp.TurnComplete = true
 	return resp, nil
 }
 
 // generateStream returns a stream of responses from the model.
 func (m *anthropicModel) generateStream(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		params, err := m.convertRequest(req)
+		params, toolKeyAliases, err := m.convertRequest(req)
 		if err != nil {
 			yield(nil, fmt.Errorf("failed to convert request: %w", err))
 			return
@@ -231,7 +257,7 @@ func (m *anthropicModel) generateStream(ctx context.Context, req *model.LLMReque
 		}
 
 		// Yield the final complete response
-		finalResp, err := converters.MessageToLLMResponse(&message)
+		finalResp, err := converters.MessageToLLMResponse(&message, toolKeyAliases)
 		if err != nil {
 			yield(nil, fmt.Errorf("failed to convert stream response: %w", err))
 			return
@@ -242,11 +268,15 @@ func (m *anthropicModel) generateStream(ctx context.Context, req *model.LLMReque
 }
 
 // convertRequest converts an LLMRequest to Anthropic MessageNewParams.
-func (m *anthropicModel) convertRequest(req *model.LLMRequest) (anthropicsdk.MessageNewParams, error) {
+func (m *anthropicModel) convertRequest(req *model.LLMRequest) (anthropicsdk.MessageNewParams, map[string]string, error) {
 	messages, err := converters.ContentsToMessages(req.Contents)
 	if err != nil {
-		return anthropicsdk.MessageNewParams{}, fmt.Errorf("failed to convert contents: %w", err)
+		return anthropicsdk.MessageNewParams{}, nil, fmt.Errorf("failed to convert contents: %w", err)
 	}
+
+	// toolKeyAliases maps aliased top-level tool property keys back to their original names; it is
+	// populated when tools are converted below and returned so the response parser can restore them.
+	var toolKeyAliases map[string]string
 
 	params := anthropicsdk.MessageNewParams{
 		Model:     m.name,
@@ -272,29 +302,42 @@ func (m *anthropicModel) convertRequest(req *model.LLMRequest) (anthropicsdk.Mes
 
 		// Tools
 		if len(req.Config.Tools) > 0 {
-			params.Tools = converters.ToolsToAnthropicTools(req.Config.Tools)
+			params.Tools, toolKeyAliases = converters.ToolsToAnthropicTools(req.Config.Tools)
 		}
 
 		// Tool choice from ToolConfig
 		if req.Config.ToolConfig != nil {
 			toolChoice, err := converters.ToolConfigToToolChoice(req.Config.ToolConfig)
 			if err != nil {
-				return anthropicsdk.MessageNewParams{}, err
+				return anthropicsdk.MessageNewParams{}, nil, err
 			}
 			params.ToolChoice = toolChoice
 		}
 
 		// Structured output format. Anthropic structured outputs are GA on both
 		// the direct API and Vertex AI (output_config.format with a json_schema,
-		// no beta header), so the same path serves both variants.
-		if req.Config.ResponseSchema != nil {
-			schemaMap := converters.SchemaToMap(req.Config.ResponseSchema)
-			enforceStrictObjectSchema(schemaMap)
-			params.OutputConfig = anthropicsdk.OutputConfigParam{
-				Format: anthropicsdk.JSONOutputFormatParam{
-					Schema: schemaMap,
-				},
-			}
+		// no beta header), so the same path serves both variants. genai carries the
+		// schema either as a structured ResponseSchema or a raw ResponseJsonSchema;
+		// support both, mirroring the tool-parameter path. Anthropic resolves
+		// $ref/$defs in the output schema (verified on Vertex), so a raw schema —
+		// including a root $ref — is passed through as-is, only made strict below.
+		//
+		// Limitation: unlike tool input schemas, Anthropic's structured-output
+		// format rejects JSON-schema validation keywords (minimum/maximum,
+		// minLength/maxLength, minItems/maxItems, pattern), which SchemaToMap can
+		// emit from a constrained genai.Schema. They are not stripped here, so a
+		// ResponseSchema that sets any of them would be rejected; strip them on
+		// this path if that need arises.
+		var responseFormatSchema map[string]any
+		switch {
+		case req.Config.ResponseSchema != nil:
+			responseFormatSchema = converters.SchemaToMap(req.Config.ResponseSchema)
+		case req.Config.ResponseJsonSchema != nil:
+			responseFormatSchema = converters.RawJSONSchemaToMap(req.Config.ResponseJsonSchema)
+		}
+		if responseFormatSchema != nil {
+			enforceStrictObjectSchema(responseFormatSchema)
+			params.OutputConfig.Format = anthropicsdk.JSONOutputFormatParam{Schema: responseFormatSchema}
 		}
 	}
 
@@ -334,7 +377,7 @@ func (m *anthropicModel) convertRequest(req *model.LLMRequest) (anthropicsdk.Mes
 		applyCacheBreakpoints(&params, m.promptCaching)
 	}
 
-	return params, nil
+	return params, toolKeyAliases, nil
 }
 
 // enforceStrictObjectSchema recursively sets additionalProperties:false on every

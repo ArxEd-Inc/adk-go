@@ -29,7 +29,7 @@ import (
 )
 
 // MessageToLLMResponse converts an Anthropic Message to a model.LLMResponse.
-func MessageToLLMResponse(msg *anthropic.Message) (*model.LLMResponse, error) {
+func MessageToLLMResponse(msg *anthropic.Message, toolKeyAliases map[string]string) (*model.LLMResponse, error) {
 	if msg == nil {
 		return nil, fmt.Errorf("nil message received")
 	}
@@ -41,7 +41,7 @@ func MessageToLLMResponse(msg *anthropic.Message) (*model.LLMResponse, error) {
 
 	var allCitations []*genai.Citation
 	for _, block := range msg.Content {
-		part, err := ContentBlockToGenaiPart(block)
+		part, err := ContentBlockToGenaiPart(block, toolKeyAliases)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert content block: %w", err)
 		}
@@ -69,8 +69,21 @@ func MessageToLLMResponse(msg *anthropic.Message) (*model.LLMResponse, error) {
 	return resp, nil
 }
 
-// ContentBlockToGenaiPart converts an Anthropic ContentBlockUnion to a genai.Part.
-func ContentBlockToGenaiPart(block anthropic.ContentBlockUnion) (*genai.Part, error) {
+// restoreAliasedKeys renames any top-level key in args that was aliased for the tool schema back to
+// its original name, using the alias -> original map from ToolsToAnthropicTools. Keys absent from
+// the map are left unchanged. args is modified in place.
+func restoreAliasedKeys(args map[string]any, toolKeyAliases map[string]string) {
+	for alias, original := range toolKeyAliases {
+		if value, ok := args[alias]; ok {
+			delete(args, alias)
+			args[original] = value
+		}
+	}
+}
+
+// ContentBlockToGenaiPart converts an Anthropic ContentBlockUnion to a genai.Part. toolKeyAliases
+// (from ToolsToAnthropicTools) restores aliased tool-call argument keys to their original names.
+func ContentBlockToGenaiPart(block anthropic.ContentBlockUnion, toolKeyAliases map[string]string) (*genai.Part, error) {
 	switch variant := block.AsAny().(type) {
 	case anthropic.TextBlock:
 		return &genai.Part{Text: variant.Text}, nil
@@ -100,6 +113,9 @@ func ContentBlockToGenaiPart(block anthropic.ContentBlockUnion) (*genai.Part, er
 				return nil, fmt.Errorf("failed to unmarshal tool input for %q (id=%s): %w", variant.Name, variant.ID, err)
 			}
 		}
+		// Restore any top-level argument keys that were aliased to satisfy Anthropic's tool-schema
+		// key pattern, so the tool receives its declared field names.
+		restoreAliasedKeys(args, toolKeyAliases)
 		return &genai.Part{
 			FunctionCall: &genai.FunctionCall{
 				ID:   variant.ID,

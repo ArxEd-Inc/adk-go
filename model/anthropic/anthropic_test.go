@@ -38,7 +38,7 @@ func userReq(cfg *genai.GenerateContentConfig) *model.LLMRequest {
 // thinking with the model's xhigh effort — not the level-derived high.
 func TestConvertRequestPerModelEffort(t *testing.T) {
 	m := &anthropicModel{name: "claude-opus-4-8", defaultMaxTokens: 64000, effort: EffortXHigh}
-	params, err := m.convertRequest(userReq(&genai.GenerateContentConfig{
+	params, _, err := m.convertRequest(userReq(&genai.GenerateContentConfig{
 		ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh},
 	}))
 	if err != nil {
@@ -56,7 +56,7 @@ func TestConvertRequestPerModelEffort(t *testing.T) {
 // derives from the request's ThinkingLevel.
 func TestConvertRequestEffortFallsBackToLevel(t *testing.T) {
 	m := &anthropicModel{name: "claude-sonnet-4-6", defaultMaxTokens: 64000}
-	params, err := m.convertRequest(userReq(&genai.GenerateContentConfig{
+	params, _, err := m.convertRequest(userReq(&genai.GenerateContentConfig{
 		ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh},
 	}))
 	if err != nil {
@@ -72,7 +72,7 @@ func TestConvertRequestEffortFallsBackToLevel(t *testing.T) {
 // with one.
 func TestConvertRequestNoThinking(t *testing.T) {
 	m := &anthropicModel{name: "claude-sonnet-4-6", defaultMaxTokens: 64000, effort: EffortHigh}
-	params, err := m.convertRequest(userReq(&genai.GenerateContentConfig{}))
+	params, _, err := m.convertRequest(userReq(&genai.GenerateContentConfig{}))
 	if err != nil {
 		t.Fatalf("convertRequest: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestConvertRequestNoThinking(t *testing.T) {
 // temperature/top_p/top_k, so they must never reach the wire.
 func TestConvertRequestDropsSamplingParams(t *testing.T) {
 	m := &anthropicModel{name: "claude-opus-4-8", defaultMaxTokens: 64000, effort: EffortXHigh}
-	params, err := m.convertRequest(userReq(&genai.GenerateContentConfig{
+	params, _, err := m.convertRequest(userReq(&genai.GenerateContentConfig{
 		Temperature: ptr(float32(0.7)),
 		TopP:        ptr(float32(0.9)),
 	}))
@@ -103,5 +103,33 @@ func TestConvertRequestDropsSamplingParams(t *testing.T) {
 		if strings.Contains(string(data), field) {
 			t.Errorf("request JSON unexpectedly contains %q: %s", field, data)
 		}
+	}
+}
+
+// TestConvertRequestResponseJsonSchema: a request that sets ResponseJsonSchema (the raw JSON-schema
+// form, as opposed to a structured ResponseSchema) carries it through as the output format schema,
+// made strict (additionalProperties:false added by enforceStrictObjectSchema).
+func TestConvertRequestResponseJsonSchema(t *testing.T) {
+	m := &anthropicModel{name: "claude-sonnet-4-6", defaultMaxTokens: 64000}
+	params, _, err := m.convertRequest(userReq(&genai.GenerateContentConfig{
+		ResponseJsonSchema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"name": map[string]any{"type": "string"}},
+			"required":   []any{"name"},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("convertRequest: %v", err)
+	}
+
+	schema := params.OutputConfig.Format.Schema
+	if schema == nil {
+		t.Fatalf("output format schema not set from ResponseJsonSchema")
+	}
+	if additionalProperties, ok := schema["additionalProperties"].(bool); !ok || additionalProperties {
+		t.Errorf("additionalProperties = %v, want false (enforceStrictObjectSchema not applied)", schema["additionalProperties"])
+	}
+	if properties, ok := schema["properties"].(map[string]any); !ok || properties["name"] == nil {
+		t.Errorf("output format schema lost its properties: %v", schema)
 	}
 }
