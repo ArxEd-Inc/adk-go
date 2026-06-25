@@ -34,6 +34,12 @@ import (
 
 const defaultMaxTokens = 16384
 
+// cloudPlatformScope is the OAuth scope Vertex AI requires, passed explicitly when loading Application
+// Default Credentials. Without an explicit scope, credentials that mint tokens by service-account
+// impersonation request an empty scope set, which the IAM Credentials API rejects with HTTP 400.
+// Metadata-server credentials already default to this scope, so passing it explicitly makes both paths work.
+const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform"
+
 type anthropicModel struct {
 	client           anthropicsdk.Client
 	name             anthropicsdk.Model
@@ -136,7 +142,7 @@ func newVertexClient(ctx context.Context, cfg *Config) anthropicsdk.Client {
 	}
 
 	return anthropicsdk.NewClient(
-		vertex.WithGoogleAuth(ctx, location, projectID),
+		vertex.WithGoogleAuth(ctx, location, projectID, cloudPlatformScope),
 	)
 }
 
