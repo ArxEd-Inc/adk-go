@@ -1,0 +1,375 @@
+// Copyright 2025 Alcova AI
+// Copyright 2026 Litix
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Modified by Litix from github.com/Alcova-AI/adk-anthropic-go (v0.1.18).
+
+package anthropic
+
+import (
+	"context"
+	"fmt"
+	"iter"
+	"os"
+
+	anthropicsdk "github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/vertex"
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/model/anthropic/internal/converters"
+)
+
+const defaultMaxTokens = 16384
+
+type anthropicModel struct {
+	client           anthropicsdk.Client
+	name             anthropicsdk.Model
+	variant          string
+	defaultMaxTokens int
+	effort           Effort
+	promptCaching    *PromptCachingConfig
+}
+
+// NewModel returns [model.LLM], backed by Anthropic Claude.
+//
+// It creates an Anthropic client based on the provided configuration.
+// If Variant is not specified, it checks the ANTHROPIC_USE_VERTEX environment variable.
+//
+// For direct Anthropic API, set APIKey in the config or the ANTHROPIC_API_KEY
+// environment variable.
+//
+// For Vertex AI, set VertexProjectID and VertexLocation in the config or use
+// GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION environment variables.
+func NewModel(ctx context.Context, modelName anthropicsdk.Model, cfg *Config) (model.LLM, error) {
+	if cfg == nil {
+		cfg = &Config{}
+	}
+
+	variant := cfg.Variant
+	if variant == "" {
+		variant = GetVariant()
+	}
+
+	var client anthropicsdk.Client
+
+	switch variant {
+	case VariantVertexAI:
+		projectID := cfg.VertexProjectID
+		if projectID == "" {
+			projectID = os.Getenv("GOOGLE_CLOUD_PROJECT")
+		}
+		if projectID == "" {
+			return nil, fmt.Errorf("VertexProjectID is required for Vertex AI (set GOOGLE_CLOUD_PROJECT)")
+		}
+
+		location := cfg.VertexLocation
+		if location == "" {
+			location = os.Getenv("GOOGLE_CLOUD_LOCATION")
+		}
+		if location == "" {
+			return nil, fmt.Errorf("VertexLocation is required for Vertex AI (set GOOGLE_CLOUD_LOCATION)")
+		}
+
+		client = newVertexClient(ctx, cfg)
+	default:
+		client = newAPIClient(cfg)
+	}
+
+	maxTokens := cfg.DefaultMaxTokens
+	if maxTokens == 0 {
+		maxTokens = defaultMaxTokens
+	}
+
+	return &anthropicModel{
+		client:           client,
+		name:             modelName,
+		variant:          variant,
+		defaultMaxTokens: maxTokens,
+		effort:           cfg.Effort,
+		promptCaching:    cfg.PromptCaching,
+	}, nil
+}
+
+// newAPIClient creates a client for the direct Anthropic API.
+func newAPIClient(cfg *Config) anthropicsdk.Client {
+	opts := []option.RequestOption{}
+
+	apiKey := cfg.APIKey
+	if apiKey == "" {
+		apiKey = os.Getenv("ANTHROPIC_API_KEY")
+	}
+	if apiKey != "" {
+		opts = append(opts, option.WithAPIKey(apiKey))
+	}
+
+	if cfg.BaseURL != "" {
+		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
+	}
+
+	return anthropicsdk.NewClient(opts...)
+}
+
+// newVertexClient creates a client for Anthropic via Vertex AI.
+// Note: The caller must validate that projectID and region are set before calling this.
+func newVertexClient(ctx context.Context, cfg *Config) anthropicsdk.Client {
+	projectID := cfg.VertexProjectID
+	if projectID == "" {
+		projectID = os.Getenv("GOOGLE_CLOUD_PROJECT")
+	}
+
+	location := cfg.VertexLocation
+	if location == "" {
+		location = os.Getenv("GOOGLE_CLOUD_LOCATION")
+	}
+
+	return anthropicsdk.NewClient(
+		vertex.WithGoogleAuth(ctx, location, projectID),
+	)
+}
+
+// Name returns the model name.
+func (m *anthropicModel) Name() string {
+	return string(m.name)
+}
+
+// GenerateContent calls the Anthropic model.
+func (m *anthropicModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	m.maybeAppendUserContent(req)
+
+	if stream {
+		return m.generateStream(ctx, req)
+	}
+
+	return func(yield func(*model.LLMResponse, error) bool) {
+		resp, err := m.generate(ctx, req)
+		yield(resp, err)
+	}
+}
+
+// generate calls the model synchronously.
+func (m *anthropicModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+	params, err := m.convertRequest(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert request: %w", err)
+	}
+
+	msg, err := m.client.Messages.New(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call model: %w", err)
+	}
+
+	resp, err := converters.MessageToLLMResponse(msg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert response: %w", err)
+	}
+
+	return resp, nil
+}
+
+// generateStream returns a stream of responses from the model.
+func (m *anthropicModel) generateStream(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		params, err := m.convertRequest(req)
+		if err != nil {
+			yield(nil, fmt.Errorf("failed to convert request: %w", err))
+			return
+		}
+
+		stream := m.client.Messages.NewStreaming(ctx, params)
+		message := anthropicsdk.Message{}
+
+		for stream.Next() {
+			event := stream.Current()
+
+			// Accumulate the message
+			if err := message.Accumulate(event); err != nil {
+				yield(nil, fmt.Errorf("failed to accumulate message: %w", err))
+				return
+			}
+
+			// Handle different event types for streaming
+			switch ev := event.AsAny().(type) {
+			case anthropicsdk.ContentBlockDeltaEvent:
+				// Handle text deltas
+				switch delta := ev.Delta.AsAny().(type) {
+				case anthropicsdk.TextDelta:
+					resp := converters.StreamDeltaToPartialResponse(delta.Text)
+					if !yield(resp, nil) {
+						return
+					}
+				case anthropicsdk.ThinkingDelta:
+					resp := converters.StreamThinkingDeltaToPartialResponse(delta.Thinking)
+					if !yield(resp, nil) {
+						return
+					}
+				}
+			}
+		}
+
+		if err := stream.Err(); err != nil {
+			yield(nil, fmt.Errorf("stream error: %w", err))
+			return
+		}
+
+		// Yield the final complete response
+		finalResp, err := converters.MessageToLLMResponse(&message)
+		if err != nil {
+			yield(nil, fmt.Errorf("failed to convert stream response: %w", err))
+			return
+		}
+		finalResp.TurnComplete = true
+		yield(finalResp, nil)
+	}
+}
+
+// convertRequest converts an LLMRequest to Anthropic MessageNewParams.
+func (m *anthropicModel) convertRequest(req *model.LLMRequest) (anthropicsdk.MessageNewParams, error) {
+	messages, err := converters.ContentsToMessages(req.Contents)
+	if err != nil {
+		return anthropicsdk.MessageNewParams{}, fmt.Errorf("failed to convert contents: %w", err)
+	}
+
+	params := anthropicsdk.MessageNewParams{
+		Model:     m.name,
+		Messages:  messages,
+		MaxTokens: int64(m.defaultMaxTokens),
+	}
+
+	if req.Config != nil {
+		// System instruction
+		if req.Config.SystemInstruction != nil {
+			params.System = converters.SystemInstructionToSystem(req.Config.SystemInstruction)
+		}
+
+		// Sampling parameters (temperature/top_p/top_k) are intentionally not
+		// forwarded: the latest Claude models reject them (HTTP 400) when used
+		// with adaptive thinking, and depth is controlled via effort instead.
+		if len(req.Config.StopSequences) > 0 {
+			params.StopSequences = req.Config.StopSequences
+		}
+		if req.Config.MaxOutputTokens > 0 {
+			params.MaxTokens = int64(req.Config.MaxOutputTokens)
+		}
+
+		// Tools
+		if len(req.Config.Tools) > 0 {
+			params.Tools = converters.ToolsToAnthropicTools(req.Config.Tools)
+		}
+
+		// Tool choice from ToolConfig
+		if req.Config.ToolConfig != nil {
+			toolChoice, err := converters.ToolConfigToToolChoice(req.Config.ToolConfig)
+			if err != nil {
+				return anthropicsdk.MessageNewParams{}, err
+			}
+			params.ToolChoice = toolChoice
+		}
+
+		// Structured output format. Anthropic structured outputs are GA on both
+		// the direct API and Vertex AI (output_config.format with a json_schema,
+		// no beta header), so the same path serves both variants.
+		if req.Config.ResponseSchema != nil {
+			schemaMap := converters.SchemaToMap(req.Config.ResponseSchema)
+			enforceStrictObjectSchema(schemaMap)
+			params.OutputConfig = anthropicsdk.OutputConfigParam{
+				Format: anthropicsdk.JSONOutputFormatParam{
+					Schema: schemaMap,
+				},
+			}
+		}
+	}
+
+	// Thinking config. We target only adaptive-capable models, so the converter
+	// returns adaptive thinking (or off) — never a budget_tokens form, which the
+	// latest models reject. When thinking is on, effort comes from the model's
+	// configured Effort, falling back to the value derived from the request's
+	// genai ThinkingLevel.
+	var thinkingCfg *genai.ThinkingConfig
+	if req.Config != nil {
+		thinkingCfg = req.Config.ThinkingConfig
+	}
+	mapping := converters.ThinkingConfigToAnthropic(thinkingCfg)
+	params.Thinking = mapping.Thinking
+	if mapping.Thinking.OfAdaptive != nil {
+		effort := m.effort
+		if effort == "" {
+			effort = mapping.Effort
+		}
+		params.OutputConfig.Effort = effort
+	}
+
+	// Anthropic rejects extended thinking (manual or adaptive) combined with
+	// forced tool use (tool_choice.type = "tool" or "any"). When both are
+	// requested, the API may either 400 or — worse — silently produce a
+	// text/thinking response with no tool_use block, which looks to callers
+	// like the model just refused to call the tool. The forced tool_choice
+	// is the load-bearing semantic (the caller has pinned the response
+	// shape), so drop the thinking parameter on this side of the wire.
+	// Effort is meaningless without adaptive thinking, so clear it too.
+	if converters.IsForcedToolUse(params.ToolChoice) {
+		params.Thinking = anthropicsdk.ThinkingConfigParamUnion{}
+		params.OutputConfig.Effort = ""
+	}
+
+	if m.promptCaching != nil {
+		applyCacheBreakpoints(&params, m.promptCaching)
+	}
+
+	return params, nil
+}
+
+// enforceStrictObjectSchema recursively sets additionalProperties:false on every
+// object node of a JSON-schema map. Anthropic structured outputs reject an
+// "object" schema that doesn't explicitly disallow additional properties
+// ("output_config.format.schema: For 'object' type, 'additionalProperties' must
+// be explicitly set to false"), and the genai→map conversion doesn't emit it.
+func enforceStrictObjectSchema(node any) {
+	switch n := node.(type) {
+	case map[string]any:
+		if t, ok := n["type"].(string); ok && t == "object" {
+			if _, exists := n["additionalProperties"]; !exists {
+				n["additionalProperties"] = false
+			}
+		}
+		for _, v := range n {
+			enforceStrictObjectSchema(v)
+		}
+	case []map[string]any:
+		// SchemaToMap stores anyOf branches as []map[string]any, not []any.
+		for _, v := range n {
+			enforceStrictObjectSchema(v)
+		}
+	case []any:
+		for _, v := range n {
+			enforceStrictObjectSchema(v)
+		}
+	}
+}
+
+// maybeAppendUserContent ensures the conversation ends with a user message.
+// Anthropic requires strictly alternating user/assistant turns.
+func (m *anthropicModel) maybeAppendUserContent(req *model.LLMRequest) {
+	if len(req.Contents) == 0 {
+		req.Contents = append(req.Contents,
+			genai.NewContentFromText("Handle the requests as specified in the System Instruction.", "user"))
+		return
+	}
+
+	if last := req.Contents[len(req.Contents)-1]; last != nil && last.Role != "user" {
+		req.Contents = append(req.Contents,
+			genai.NewContentFromText("Continue processing previous requests as instructed.", "user"))
+	}
+}
