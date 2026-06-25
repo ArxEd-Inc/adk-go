@@ -18,6 +18,7 @@
 package converters
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -27,6 +28,31 @@ import (
 
 	"google.golang.org/adk/model"
 )
+
+// redactedThinkingMarker prefixes an Anthropic redacted_thinking block's encrypted Data when it is carried back in a
+// genai.Part's ThoughtSignature. ThoughtSignature is the only opaque per-Part field that survives the Vertex AI
+// session backend (PartMetadata is dropped there), so it doubles as the carrier for redacted thinking; the marker lets
+// partToContentBlock distinguish a carried redacted block from a normal thinking signature. It is deliberately
+// distinctive so a real (base64-decoded) Anthropic signature cannot collide with it.
+var redactedThinkingMarker = []byte("\x00adk-anthropic-redacted-thinking\x00")
+
+// encodeRedactedThinking packs a redacted_thinking block's Data behind redactedThinkingMarker for storage in a
+// genai.Part's ThoughtSignature.
+func encodeRedactedThinking(data string) []byte {
+	encoded := make([]byte, 0, len(redactedThinkingMarker)+len(data))
+	encoded = append(encoded, redactedThinkingMarker...)
+	encoded = append(encoded, data...)
+	return encoded
+}
+
+// decodeRedactedThinking reports whether signature carries redacted_thinking Data (i.e. begins with
+// redactedThinkingMarker) and, if so, returns the original Data.
+func decodeRedactedThinking(signature []byte) (string, bool) {
+	if !bytes.HasPrefix(signature, redactedThinkingMarker) {
+		return "", false
+	}
+	return string(signature[len(redactedThinkingMarker):]), true
+}
 
 // MessageToLLMResponse converts an Anthropic Message to a model.LLMResponse.
 func MessageToLLMResponse(msg *anthropic.Message, toolKeyAliases map[string]string) (*model.LLMResponse, error) {
@@ -98,10 +124,16 @@ func ContentBlockToGenaiPart(block anthropic.ContentBlockUnion, toolKeyAliases m
 		}, nil
 
 	case anthropic.RedactedThinkingBlock:
-		// Redacted thinking - we can't see the content but preserve the marker
+		// Redacted thinking: Anthropic encrypts the reasoning and returns opaque Data in place of a signature.
+		// Preserve Data so the block can be replayed faithfully — Anthropic requires redacted-thinking blocks that
+		// precede a tool_use to be passed back unchanged. genai.Part has no field for redacted data, and the Vertex AI
+		// session backend persists only a fixed set of Part fields, so carry Data in ThoughtSignature behind
+		// redactedThinkingMarker; partToContentBlock recognizes it on replay. Text is kept only for human-readable
+		// logs/UI and is ignored on replay.
 		return &genai.Part{
-			Text:    "[thinking redacted]",
-			Thought: true,
+			Text:             "[thinking redacted]",
+			Thought:          true,
+			ThoughtSignature: encodeRedactedThinking(variant.Data),
 		}, nil
 
 	case anthropic.ToolUseBlock:

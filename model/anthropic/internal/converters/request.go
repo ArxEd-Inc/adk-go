@@ -141,6 +141,17 @@ func partToContentBlock(part *genai.Part, sanitizer *toolUseIDSanitizer) (*anthr
 		return nil, nil
 	}
 
+	// Redacted thinking carried back: response.go stashed the block's encrypted Data in ThoughtSignature
+	// behind redactedThinkingMarker. Replay it faithfully as a redacted_thinking block so Anthropic accepts
+	// it before a following tool_use. Checked before the normal-signature branch, since a carried redacted
+	// block also has a non-empty ThoughtSignature.
+	if part.Thought {
+		if data, ok := decodeRedactedThinking(part.ThoughtSignature); ok {
+			block := anthropic.NewRedactedThinkingBlock(data)
+			return &block, nil
+		}
+	}
+
 	// Thinking block. A thought carried back into history must be replayed as a
 	// thinking block with its signature so Anthropic accepts it on the same
 	// model — including thoughts whose text is empty (which happens under
@@ -157,12 +168,14 @@ func partToContentBlock(part *genai.Part, sanitizer *toolUseIDSanitizer) (*anthr
 		return &block, nil
 	}
 
-	// A thought part with no signature can't be replayed as a thinking block (Anthropic requires the
-	// signature) — e.g. a redacted-thinking marker or a persisted streaming partial. Drop it instead
-	// of letting it fall through to the text gate below, which would re-enter the reasoning into
-	// history as assistant text.
+	// A thought part that is neither a signed thinking block nor recognized redacted thinking can't be
+	// faithfully replayed (Anthropic requires a signature or the redacted Data). This shouldn't occur:
+	// MessageToLLMResponse always sets a signature or the redacted marker, streamed partials aren't
+	// persisted, and the session/contents layers preserve both — so reaching here means corrupted or
+	// foreign history. Error rather than silently dropping reasoning, consistent with how this converter
+	// treats other unconvertible content.
 	if part.Thought {
-		return nil, nil
+		return nil, fmt.Errorf("thought part cannot be replayed: no signature and no redacted-thinking data")
 	}
 
 	// Text content

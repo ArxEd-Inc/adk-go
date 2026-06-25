@@ -24,10 +24,12 @@
 // per-model effort (there is no legacy budget_tokens path); tool-use IDs are
 // sanitized to Anthropic's required shape; tool input schemas resolve a root
 // $ref and alias over-long top-level property keys; non-streaming requests are
-// issued as streaming internally (Vertex rejects large non-streaming calls); and
-// the refusal stop reason is surfaced. Both the Vertex AI and direct Anthropic
-// API backends are selectable via [Config] (Variant / ANTHROPIC_USE_VERTEX), but
-// only the Vertex AI path is exercised.
+// issued as streaming internally (Vertex rejects large non-streaming calls); the
+// refusal stop reason is surfaced; and redacted thinking is round-tripped
+// faithfully (its data rides in the thought signature), while a thought that
+// cannot be replayed is an error rather than silently dropped. Both the Vertex AI
+// and direct Anthropic API backends are selectable via [Config] (Variant /
+// ANTHROPIC_USE_VERTEX), but only the Vertex AI path is exercised.
 //
 // TODO(#225): replace this package with the upstream
 // google.golang.org/adk/model/anthropic once google/adk-go merges Anthropic

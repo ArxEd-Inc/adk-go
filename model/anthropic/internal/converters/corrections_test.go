@@ -105,18 +105,119 @@ func TestPartToContentBlockEmptyTextThought(t *testing.T) {
 	}
 }
 
-// TestPartToContentBlockUnsignedThoughtDropped verifies that a thought part with no signature (a
-// redacted-thinking marker, or a persisted streaming partial) is dropped on replay rather than
-// re-entering history as assistant text.
-func TestPartToContentBlockUnsignedThoughtDropped(t *testing.T) {
-	part := &genai.Part{Thought: true, Text: "[thinking redacted]"}
+// TestPartToContentBlockUnsignedThoughtErrors verifies that a thought part carrying neither a signature nor
+// redacted-thinking data cannot be faithfully replayed and is surfaced as an error rather than silently dropped.
+// MessageToLLMResponse never produces such a part (a thinking block always carries a signature, a redacted block the
+// redacted marker), so reaching here means corrupted or foreign history.
+func TestPartToContentBlockUnsignedThoughtErrors(t *testing.T) {
+	part := &genai.Part{Thought: true, Text: "stray reasoning"}
 
-	block, err := partToContentBlock(part, newToolUseIDSanitizer())
-	if err != nil {
-		t.Fatalf("partToContentBlock: %v", err)
+	if _, err := partToContentBlock(part, newToolUseIDSanitizer()); err == nil {
+		t.Fatalf("unsigned, unmarked thought did not error; want an error")
 	}
-	if block != nil {
-		t.Fatalf("unsigned thought produced a block (%+v); want it dropped", block)
+}
+
+// TestThoughtRoundTripThroughConverters verifies the full converter symmetry our multi-turn thinking + tool-use agents
+// depend on: an Anthropic assistant message of [thinking, redacted_thinking, tool_use] converted to a genai response
+// (MessageToLLMResponse) and back to Anthropic message params (ContentsToMessages) reproduces a
+// [thinking, redacted_thinking, tool_use] assistant message in order, preserving the thinking signature and the
+// redacted data.
+func TestThoughtRoundTripThroughConverters(t *testing.T) {
+	signature := base64.StdEncoding.EncodeToString([]byte("signature-bytes"))
+	const redactedData = "ENCRYPTED-BLOB"
+	raw := `{
+		"id": "msg_1",
+		"type": "message",
+		"role": "assistant",
+		"model": "claude-opus-4-8",
+		"stop_reason": "tool_use",
+		"content": [
+			{"type": "thinking", "thinking": "let me reason", "signature": "` + signature + `"},
+			{"type": "redacted_thinking", "data": "` + redactedData + `"},
+			{"type": "tool_use", "id": "toolu_abc", "name": "lookup", "input": {"q": 1}}
+		],
+		"usage": {"input_tokens": 1, "output_tokens": 1}
+	}`
+
+	var msg anthropic.Message
+	if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+		t.Fatalf("unmarshal message: %v", err)
+	}
+
+	resp, err := MessageToLLMResponse(&msg, nil)
+	if err != nil {
+		t.Fatalf("MessageToLLMResponse: %v", err)
+	}
+
+	messages, err := ContentsToMessages([]*genai.Content{resp.Content})
+	if err != nil {
+		t.Fatalf("ContentsToMessages: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("got %d messages, want 1 assistant message", len(messages))
+	}
+
+	blocks := messages[0].Content
+	if len(blocks) != 3 {
+		t.Fatalf("got %d blocks, want [thinking, redacted_thinking, tool_use]", len(blocks))
+	}
+	if blocks[0].OfThinking == nil {
+		t.Fatalf("block 0 is not a thinking block: %+v", blocks[0])
+	}
+	if blocks[0].OfThinking.Thinking != "let me reason" {
+		t.Errorf("thinking text = %q, want %q", blocks[0].OfThinking.Thinking, "let me reason")
+	}
+	if blocks[0].OfThinking.Signature != signature {
+		t.Errorf("thinking signature = %q, want %q (did not round-trip)", blocks[0].OfThinking.Signature, signature)
+	}
+	if blocks[1].OfRedactedThinking == nil {
+		t.Fatalf("block 1 is not a redacted_thinking block: %+v", blocks[1])
+	}
+	if blocks[1].OfRedactedThinking.Data != redactedData {
+		t.Errorf("redacted data = %q, want %q (did not round-trip)", blocks[1].OfRedactedThinking.Data, redactedData)
+	}
+	if blocks[2].OfToolUse == nil {
+		t.Fatalf("block 2 is not a tool_use block: %+v", blocks[2])
+	}
+}
+
+// TestRedactedThinkingCarriedInThoughtSignature verifies that redacted thinking is carried in ThoughtSignature — the
+// only opaque per-Part field the Vertex AI session backend persists — and not in PartMetadata, which that backend
+// drops. Guards against a regression that would silently lose redacted thinking across turns.
+func TestRedactedThinkingCarriedInThoughtSignature(t *testing.T) {
+	const redactedData = "ENCRYPTED-BLOB"
+	raw := `{"id":"m","type":"message","role":"assistant","model":"claude-opus-4-8","stop_reason":"end_turn",` +
+		`"content":[{"type":"redacted_thinking","data":"` + redactedData + `"}],"usage":{"input_tokens":1,"output_tokens":1}}`
+
+	var msg anthropic.Message
+	if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+		t.Fatalf("unmarshal message: %v", err)
+	}
+	resp, err := MessageToLLMResponse(&msg, nil)
+	if err != nil {
+		t.Fatalf("MessageToLLMResponse: %v", err)
+	}
+	if len(resp.Content.Parts) != 1 {
+		t.Fatalf("got %d parts, want 1", len(resp.Content.Parts))
+	}
+	part := resp.Content.Parts[0]
+	if part.PartMetadata != nil {
+		t.Errorf("redacted data leaked into PartMetadata %v; the Vertex backend drops it", part.PartMetadata)
+	}
+	if data, ok := decodeRedactedThinking(part.ThoughtSignature); !ok || data != redactedData {
+		t.Errorf("redacted data not recoverable from ThoughtSignature: got (%q, %v)", data, ok)
+	}
+}
+
+// TestRedactedThinkingEncodeDecode verifies the marker carrier round-trips and that an ordinary signature is not
+// mistaken for redacted data (marker collision guard).
+func TestRedactedThinkingEncodeDecode(t *testing.T) {
+	const data = "ENCRYPTED-BLOB"
+	if got, ok := decodeRedactedThinking(encodeRedactedThinking(data)); !ok || got != data {
+		t.Errorf("decode(encode(%q)) = (%q, %v), want (%q, true)", data, got, ok, data)
+	}
+	if _, ok := decodeRedactedThinking([]byte("an-ordinary-signature")); ok {
+		t.Errorf("an ordinary signature was decoded as redacted data; marker collision")
 	}
 }
 
