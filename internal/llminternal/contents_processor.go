@@ -87,7 +87,9 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 			continue
 		}
 		if isOtherAgentReply(agentName, ev) {
-			filtered = append(filtered, ConvertForeignEvent(ev))
+			if converted := ConvertForeignEvent(ev); converted != nil {
+				filtered = append(filtered, converted)
+			}
 		} else {
 			filtered = append(filtered, ev)
 		}
@@ -520,6 +522,8 @@ func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
 // This is to provide another aget's output as context to the current agent,
 // so that the current agent can continue to respond, such as summarizing
 // the previous agent's reply, etc.
+// It returns nil when no presentable content remains after excluding the
+// other agent's thoughts (e.g. a thought-only foreign turn).
 func ConvertForeignEvent(ev *session.Event) *session.Event {
 	content := utils.Content(ev)
 	if content == nil || len(content.Parts) == 0 {
@@ -532,6 +536,12 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 	}
 	for _, p := range content.Parts {
 		switch {
+		case p.Thought:
+			// Exclude another agent's thoughts from the context: a foreign agent's private reasoning must
+			// not be replayed into the current agent's turn. Mirrors adk-python's _present_other_agent_message,
+			// which checks `if part.thought` first; placing it first here also drops function-call/response
+			// parts that some models (e.g. Gemini 3 Flash) mark thought=True, matching Python. The case body
+			// is intentionally empty: Go switch cases don't fall through, so the part is simply skipped.
 		case p.Text != "":
 			converted.Parts = append(converted.Parts, &genai.Part{
 				Text: fmt.Sprintf("[%s] said: %s", ev.Author, p.Text),
@@ -547,6 +557,13 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 		default: // fallback to the original part for non-text and non-functionCall parts.
 			converted.Parts = append(converted.Parts, p)
 		}
+	}
+
+	// Mirror adk-python: when every part was dropped (e.g. a thought-only foreign turn) and only the
+	// "For context:" header remains, there is nothing to present, so drop the event rather than emit a
+	// bare header.
+	if len(converted.Parts) == 1 {
+		return nil
 	}
 
 	return &session.Event{ // made-up event. Don't go through types.NewEvent.

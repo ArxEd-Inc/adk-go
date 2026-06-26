@@ -310,6 +310,53 @@ func TestContentsRequestProcessor(t *testing.T) {
 			},
 		},
 		{
+			// A foreign event with a thought part keeps the visible text but drops the thought,
+			// verified through the full ContentsRequestProcessor path.
+			name: "anotherAgentEventWithThought",
+			events: []*session.Event{
+				{
+					Author: "anotherAgent",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{Thought: true, ThoughtSignature: []byte("sig"), Text: "private reasoning"},
+								{Text: "Foreign message"},
+							},
+						},
+					},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role: "user",
+					Parts: []*genai.Part{
+						{Text: "For context:"},
+						{Text: "[anotherAgent] said: Foreign message"},
+					},
+				},
+			},
+		},
+		{
+			// A thought-only foreign turn is dropped entirely: ConvertForeignEvent returns nil and the
+			// caller's nil guard keeps it out of the contents, so no content is produced.
+			name: "anotherAgentEventThoughtOnly",
+			events: []*session.Event{
+				{
+					Author: "anotherAgent",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{Thought: true, ThoughtSignature: []byte("sig"), Text: "private reasoning"},
+							},
+						},
+					},
+				},
+			},
+			want: nil,
+		},
+		{
 			name: "ExcludeToolConfirmation",
 			events: []*session.Event{
 				{
@@ -585,6 +632,96 @@ func TestConvertForeignEvent(t *testing.T) {
 				},
 				Branch: "b",
 			},
+		},
+		{
+			// A foreign agent's empty-text signed thought (as emitted by thinking-capable models)
+			// is dropped, leaving only the header, so the whole event is dropped.
+			name: "EmptyTextSignedThought",
+			event: &session.Event{
+				Timestamp: now,
+				Author:    "foreign",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: "model",
+						Parts: []*genai.Part{
+							{Thought: true, ThoughtSignature: []byte("sig"), Text: ""},
+						},
+					},
+				},
+				Branch: "b",
+			},
+			want: nil,
+		},
+		{
+			// A thought with text is dropped (not re-emitted as "said:"), so a thought-only turn
+			// leaves only the header and the event is dropped.
+			name: "NonEmptyTextThought",
+			event: &session.Event{
+				Timestamp: now,
+				Author:    "foreign",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: "model",
+						Parts: []*genai.Part{
+							{Thought: true, ThoughtSignature: []byte("sig"), Text: "secret reasoning"},
+						},
+					},
+				},
+				Branch: "b",
+			},
+			want: nil,
+		},
+		{
+			// The thought is dropped while the visible answer is kept, so the event survives with
+			// the header and the answer's "said:" stub only.
+			name: "ThoughtAndText",
+			event: &session.Event{
+				Timestamp: now,
+				Author:    "foreign",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: "model",
+						Parts: []*genai.Part{
+							{Thought: true, ThoughtSignature: []byte("sig"), Text: "secret reasoning"},
+							{Text: "the visible answer"},
+						},
+					},
+				},
+				Branch: "b",
+			},
+			want: &session.Event{
+				Timestamp: now,
+				Author:    "user",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: "user",
+						Parts: []*genai.Part{
+							{Text: "For context:"},
+							{Text: "[foreign] said: the visible answer"},
+						},
+					},
+				},
+				Branch: "b",
+			},
+		},
+		{
+			// A function call marked thought=True (e.g. by Gemini 3 Flash) is dropped because the
+			// thought case is checked first, matching adk-python's _present_other_agent_message.
+			name: "FunctionCallMarkedThought",
+			event: &session.Event{
+				Timestamp: now,
+				Author:    "foreign",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: "model",
+						Parts: []*genai.Part{
+							{FunctionCall: &genai.FunctionCall{Name: "x"}, Thought: true},
+						},
+					},
+				},
+				Branch: "b",
+			},
+			want: nil,
 		},
 	}
 
