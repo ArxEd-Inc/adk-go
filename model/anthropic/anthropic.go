@@ -47,6 +47,7 @@ type anthropicModel struct {
 	variant          string
 	defaultMaxTokens int
 	effort           Effort
+	thinkingMode     ThinkingMode
 	promptCaching    *PromptCachingConfig
 }
 
@@ -110,6 +111,7 @@ func NewModel(ctx context.Context, modelName anthropicsdk.Model, cfg *Config) (m
 		variant:          variant,
 		defaultMaxTokens: maxTokens,
 		effort:           cfg.Effort,
+		thinkingMode:     cfg.ThinkingMode,
 		promptCaching:    cfg.PromptCaching,
 	}, nil
 }
@@ -341,16 +343,17 @@ func (m *anthropicModel) convertRequest(req *model.LLMRequest) (anthropicsdk.Mes
 		}
 	}
 
-	// Thinking config. We target only adaptive-capable models, so the converter
-	// returns adaptive thinking (or off) — never a budget_tokens form, which the
-	// latest models reject. When thinking is on, effort comes from the model's
-	// configured Effort, falling back to the value derived from the request's
-	// genai ThinkingLevel.
+	// Thinking config. The converter emits adaptive thinking for adaptive-capable
+	// models (Opus 4.8 / Sonnet 4.6 and newer) and a budget_tokens form for models
+	// that reject adaptive thinking and effort (e.g. Haiku 4.5), selected by this
+	// model's ThinkingMode. When adaptive thinking is on, effort comes from the
+	// model's configured Effort, falling back to the value derived from the
+	// request's genai ThinkingLevel; budget mode ignores effort.
 	var thinkingCfg *genai.ThinkingConfig
 	if req.Config != nil {
 		thinkingCfg = req.Config.ThinkingConfig
 	}
-	mapping := converters.ThinkingConfigToAnthropic(thinkingCfg)
+	mapping := converters.ThinkingConfigToAnthropic(thinkingCfg, m.thinkingMode == ThinkingModeBudget)
 	params.Thinking = mapping.Thinking
 	if mapping.Thinking.OfAdaptive != nil {
 		effort := m.effort

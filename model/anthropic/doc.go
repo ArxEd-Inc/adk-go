@@ -20,9 +20,10 @@
 //
 // It is vendored from github.com/Alcova-AI/adk-anthropic-go (v0.1.18, Apache
 // 2.0) and adapted to the ADK's model/<provider> layout, then corrected for the
-// latest Claude models and for Vertex AI: thinking is adaptive-only with a
-// per-model effort (there is no legacy budget_tokens path); tool-use IDs are
-// sanitized to Anthropic's required shape; tool input schemas resolve a root
+// latest Claude models and for Vertex AI: thinking is adaptive with a per-model
+// effort for adaptive-capable models, or a budget_tokens form for models that
+// reject adaptive thinking (selected per model via Config.ThinkingMode); tool-use
+// IDs are sanitized to Anthropic's required shape; tool input schemas resolve a root
 // $ref and alias over-long top-level property keys; non-streaming requests are
 // issued as streaming internally (Vertex rejects large non-streaming calls); the
 // refusal stop reason is surfaced; and redacted thinking is round-tripped

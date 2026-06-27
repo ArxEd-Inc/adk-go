@@ -34,6 +34,25 @@ const (
 	EffortMax    Effort = anthropicsdk.OutputConfigEffortMax
 )
 
+// ThinkingMode selects how extended thinking is expressed on the wire, since
+// Claude models differ in what they accept. Set it per model to match the chosen
+// model's capability. The zero value is ThinkingModeAdaptive.
+type ThinkingMode int
+
+// Thinking modes, selected per model to match its capability.
+const (
+	// ThinkingModeAdaptive emits adaptive thinking (thinking.type "adaptive")
+	// with depth controlled by output_config.effort. Required by the latest
+	// Claude models (Opus 4.8 / Sonnet 4.6 and newer), which reject a fixed
+	// budget_tokens with a 400.
+	ThinkingModeAdaptive ThinkingMode = iota
+	// ThinkingModeBudget emits manual extended thinking (thinking.type "enabled"
+	// with budget_tokens) for models that reject adaptive thinking and the effort
+	// parameter (e.g. Haiku 4.5). The budget is derived from each request's genai
+	// ThinkingLevel.
+	ThinkingModeBudget
+)
+
 // CacheBreakpoint configures a single cache control breakpoint.
 type CacheBreakpoint struct {
 	// TTL controls the cache time-to-live for this breakpoint.
@@ -98,6 +117,12 @@ type Config struct {
 	// Effort sets output_config.effort on requests where thinking is enabled,
 	// pinning the reasoning depth for this model rather than deriving it from
 	// each request's genai ThinkingLevel. When empty, effort is derived from the
-	// request's ThinkingLevel instead.
+	// request's ThinkingLevel instead. Ignored under ThinkingModeBudget, which
+	// uses budget_tokens rather than effort.
 	Effort Effort
+
+	// ThinkingMode selects how extended thinking is expressed for this model
+	// (adaptive vs. a manual budget_tokens form), matching what the chosen Claude
+	// model supports. The zero value is ThinkingModeAdaptive.
+	ThinkingMode ThinkingMode
 }

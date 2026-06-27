@@ -84,6 +84,32 @@ func TestConvertRequestNoThinking(t *testing.T) {
 	}
 }
 
+// TestConvertRequestBudgetModeThinking: a model in ThinkingModeBudget (e.g. the
+// Haiku integration-testing tier), given a request with ThinkingLevelHigh, must
+// carry manual budget_tokens thinking and neither adaptive thinking nor an
+// effort — both of which Haiku rejects with a 400.
+func TestConvertRequestBudgetModeThinking(t *testing.T) {
+	m := &anthropicModel{name: "claude-haiku-4-5", defaultMaxTokens: 64000, thinkingMode: ThinkingModeBudget}
+	params, _, err := m.convertRequest(userReq(&genai.GenerateContentConfig{
+		ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh},
+	}))
+	if err != nil {
+		t.Fatalf("convertRequest: %v", err)
+	}
+	if params.Thinking.OfEnabled == nil {
+		t.Fatalf("thinking not in budget_tokens form")
+	}
+	if got := params.Thinking.OfEnabled.BudgetTokens; got != 10000 {
+		t.Fatalf("budget_tokens = %d, want 10000", got)
+	}
+	if params.Thinking.OfAdaptive != nil {
+		t.Fatalf("budget mode emitted adaptive thinking")
+	}
+	if params.OutputConfig.Effort != "" {
+		t.Fatalf("budget mode set effort %q; want none", params.OutputConfig.Effort)
+	}
+}
+
 // TestConvertRequestDropsSamplingParams: the latest models reject
 // temperature/top_p/top_k, so they must never reach the wire.
 func TestConvertRequestDropsSamplingParams(t *testing.T) {

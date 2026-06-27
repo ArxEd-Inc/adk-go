@@ -26,16 +26,20 @@ import (
 
 func ptr[T any](v T) *T { return &v }
 
-// TestThinkingConfigToAnthropic covers the always-adaptive thinking mapping:
-// thinking is either adaptive (with an effort hint from the level) or off, and
-// there is never a budget_tokens (manual) form.
+// TestThinkingConfigToAnthropic covers the thinking mapping in both modes:
+// adaptive mode emits adaptive thinking (with an effort hint from the level) or
+// off; budget mode emits a manual budget_tokens form (per level) or off. The
+// three "off" guards (nil cfg, explicit zero budget, Minimal level) are shared.
 func TestThinkingConfigToAnthropic(t *testing.T) {
 	cases := []struct {
 		name       string
 		cfg        *genai.ThinkingConfig
+		budgetMode bool
 		wantOn     bool
 		wantEffort anthropic.OutputConfigEffort
+		wantBudget int64
 	}{
+		// Adaptive mode (the default, for adaptive-capable models).
 		{name: "nil is off", cfg: nil, wantOn: false},
 		{name: "minimal is off", cfg: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMinimal}, wantOn: false},
 		{name: "explicit zero budget is off", cfg: &genai.ThinkingConfig{ThinkingBudget: ptr(int32(0))}, wantOn: false},
@@ -43,17 +47,43 @@ func TestThinkingConfigToAnthropic(t *testing.T) {
 		{name: "medium is adaptive+medium", cfg: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMedium}, wantOn: true, wantEffort: anthropic.OutputConfigEffortMedium},
 		{name: "low is adaptive+low", cfg: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow}, wantOn: true, wantEffort: anthropic.OutputConfigEffortLow},
 		{name: "nonzero budget is adaptive (no manual form)", cfg: &genai.ThinkingConfig{ThinkingBudget: ptr(int32(8000))}, wantOn: true},
+
+		// Budget mode (for models that reject adaptive thinking + effort, e.g. Haiku 4.5).
+		{name: "budget: nil is off", cfg: nil, budgetMode: true, wantOn: false},
+		{name: "budget: minimal is off", cfg: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMinimal}, budgetMode: true, wantOn: false},
+		{name: "budget: explicit zero budget is off", cfg: &genai.ThinkingConfig{ThinkingBudget: ptr(int32(0))}, budgetMode: true, wantOn: false},
+		{name: "budget: unspecified level is off", cfg: &genai.ThinkingConfig{}, budgetMode: true, wantOn: false},
+		{name: "budget: high is enabled 10000", cfg: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}, budgetMode: true, wantOn: true, wantBudget: 10000},
+		{name: "budget: medium is enabled 5000", cfg: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMedium}, budgetMode: true, wantOn: true, wantBudget: 5000},
+		{name: "budget: low is enabled 1024", cfg: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow}, budgetMode: true, wantOn: true, wantBudget: 1024},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ThinkingConfigToAnthropic(tc.cfg)
+			got := ThinkingConfigToAnthropic(tc.cfg, tc.budgetMode)
+			if tc.budgetMode {
+				on := got.Thinking.OfEnabled != nil
+				if on != tc.wantOn {
+					t.Fatalf("budget thinking on = %v, want %v", on, tc.wantOn)
+				}
+				// Budget mode must never emit adaptive thinking or an effort hint.
+				if got.Thinking.OfAdaptive != nil {
+					t.Fatalf("budget mode emitted adaptive thinking; want budget_tokens")
+				}
+				if got.Effort != "" {
+					t.Fatalf("budget mode set effort %q; want none", got.Effort)
+				}
+				if on && got.Thinking.OfEnabled.BudgetTokens != tc.wantBudget {
+					t.Fatalf("budget_tokens = %d, want %d", got.Thinking.OfEnabled.BudgetTokens, tc.wantBudget)
+				}
+				return
+			}
 			on := got.Thinking.OfAdaptive != nil
 			if on != tc.wantOn {
 				t.Fatalf("thinking on = %v, want %v", on, tc.wantOn)
 			}
-			// We must never emit the legacy manual/budget_tokens form.
+			// Adaptive mode must never emit the manual/budget_tokens form.
 			if got.Thinking.OfEnabled != nil {
-				t.Fatalf("emitted budget_tokens thinking; want adaptive-only")
+				t.Fatalf("adaptive mode emitted budget_tokens thinking; want adaptive-only")
 			}
 			if got.Effort != tc.wantEffort {
 				t.Fatalf("effort = %q, want %q", got.Effort, tc.wantEffort)

@@ -454,22 +454,25 @@ type ThinkingMapping struct {
 }
 
 // ThinkingConfigToAnthropic maps a genai.ThinkingConfig to Anthropic's thinking
-// parameter plus an optional effort hint. This package targets only
-// adaptive-capable Claude models (Opus 4.8 / Sonnet 4.6 and newer), so thinking
-// is either adaptive or off — there is no legacy budget_tokens path (which those
-// models reject with a 400). Depth is controlled by OutputConfig.Effort, which
-// the caller sets per model; the level-derived Effort here is only a fallback.
+// parameter plus an optional effort hint. budgetMode selects the wire form,
+// since Claude models differ in capability: adaptive-capable models (Opus 4.8 /
+// Sonnet 4.6 and newer) take adaptive thinking with depth controlled by
+// OutputConfig.Effort, while models that reject adaptive thinking and effort
+// (e.g. Haiku 4.5) take a manual budget_tokens form derived from ThinkingLevel.
+// The caller selects the mode per model (mirroring the Python ADK, which keys
+// off the budget value), so no model-ID list lives here.
 //
-// Mapping:
-//   - nil cfg                                 → off (omit thinking)
-//   - ThinkingBudget explicitly 0             → off
-//   - ThinkingLevel == Minimal                → off
-//   - anything else                           → adaptive (+ effort from Low/Medium/High)
+// Mapping (both modes share the three "off" guards):
+//   - nil cfg                      → off (omit thinking)
+//   - ThinkingBudget explicitly 0  → off
+//   - ThinkingLevel == Minimal     → off
+//   - adaptive mode, otherwise     → adaptive (+ effort from Low/Medium/High)
+//   - budget mode, otherwise       → enabled with budget_tokens (Low 1024 / Medium 5000 / High 10000); 0 → off
 //
 // IncludeThoughts is ignored: in genai it governs whether thought summaries are
 // returned, not whether the model thinks, and Anthropic returns thinking blocks
 // whenever thinking is on regardless.
-func ThinkingConfigToAnthropic(cfg *genai.ThinkingConfig) ThinkingMapping {
+func ThinkingConfigToAnthropic(cfg *genai.ThinkingConfig, budgetMode bool) ThinkingMapping {
 	if cfg == nil {
 		return ThinkingMapping{}
 	}
@@ -478,6 +481,15 @@ func ThinkingConfigToAnthropic(cfg *genai.ThinkingConfig) ThinkingMapping {
 	}
 	if cfg.ThinkingLevel == genai.ThinkingLevelMinimal {
 		return ThinkingMapping{}
+	}
+	if budgetMode {
+		budget := levelToBudget(cfg.ThinkingLevel)
+		if budget == 0 {
+			return ThinkingMapping{}
+		}
+		return ThinkingMapping{
+			Thinking: anthropic.ThinkingConfigParamOfEnabled(budget),
+		}
 	}
 	return ThinkingMapping{
 		Thinking: adaptiveThinking(),
@@ -505,4 +517,21 @@ func levelToEffort(level genai.ThinkingLevel) anthropic.OutputConfigEffort {
 		return anthropic.OutputConfigEffortHigh
 	}
 	return ""
+}
+
+// levelToBudget maps a genai ThinkingLevel to a manual extended-thinking
+// budget_tokens value, used under budget mode for models that don't support
+// adaptive thinking. Returns 0 for levels that don't map (Unspecified, Minimal),
+// signaling thinking off. The values are Anthropic's minimum (1024) and the
+// upstream Alcova defaults (5000 / 10000), all well below typical max_tokens.
+func levelToBudget(level genai.ThinkingLevel) int64 {
+	switch level {
+	case genai.ThinkingLevelLow:
+		return 1024
+	case genai.ThinkingLevelMedium:
+		return 5000
+	case genai.ThinkingLevelHigh:
+		return 10000
+	}
+	return 0
 }
