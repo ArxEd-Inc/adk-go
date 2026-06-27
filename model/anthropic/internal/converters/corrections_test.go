@@ -53,7 +53,7 @@ func TestThinkingConfigToAnthropic(t *testing.T) {
 		{name: "budget: minimal is off", cfg: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMinimal}, budgetMode: true, wantOn: false},
 		{name: "budget: explicit zero budget is off", cfg: &genai.ThinkingConfig{ThinkingBudget: ptr(int32(0))}, budgetMode: true, wantOn: false},
 		{name: "budget: unspecified level is off", cfg: &genai.ThinkingConfig{}, budgetMode: true, wantOn: false},
-		{name: "budget: high is enabled 10000", cfg: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}, budgetMode: true, wantOn: true, wantBudget: 10000},
+		{name: "budget: high is enabled 24000", cfg: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}, budgetMode: true, wantOn: true, wantBudget: 24000},
 		{name: "budget: medium is enabled 5000", cfg: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMedium}, budgetMode: true, wantOn: true, wantBudget: 5000},
 		{name: "budget: low is enabled 1024", cfg: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow}, budgetMode: true, wantOn: true, wantBudget: 1024},
 	}

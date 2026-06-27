@@ -467,7 +467,7 @@ type ThinkingMapping struct {
 //   - ThinkingBudget explicitly 0  → off
 //   - ThinkingLevel == Minimal     → off
 //   - adaptive mode, otherwise     → adaptive (+ effort from Low/Medium/High)
-//   - budget mode, otherwise       → enabled with budget_tokens (Low 1024 / Medium 5000 / High 10000); 0 → off
+//   - budget mode, otherwise       → enabled with budget_tokens (Low 1024 / Medium 5000 / High 24000); 0 → off
 //
 // IncludeThoughts is ignored: in genai it governs whether thought summaries are
 // returned, not whether the model thinks, and Anthropic returns thinking blocks
@@ -522,8 +522,10 @@ func levelToEffort(level genai.ThinkingLevel) anthropic.OutputConfigEffort {
 // levelToBudget maps a genai ThinkingLevel to a manual extended-thinking
 // budget_tokens value, used under budget mode for models that don't support
 // adaptive thinking. Returns 0 for levels that don't map (Unspecified, Minimal),
-// signaling thinking off. The values are Anthropic's minimum (1024) and the
-// upstream Alcova defaults (5000 / 10000), all well below typical max_tokens.
+// signaling thinking off. Low is Anthropic's minimum (1024) and Medium is the
+// upstream Alcova default (5000); High is raised above the Alcova default of
+// 10000 to 24000, giving budget-mode models (e.g. Haiku) more reasoning room for
+// multi-step tool planning. All stay well below typical max_tokens.
 func levelToBudget(level genai.ThinkingLevel) int64 {
 	switch level {
 	case genai.ThinkingLevelLow:
@@ -531,7 +533,7 @@ func levelToBudget(level genai.ThinkingLevel) int64 {
 	case genai.ThinkingLevelMedium:
 		return 5000
 	case genai.ThinkingLevelHigh:
-		return 10000
+		return 24000
 	}
 	return 0
 }

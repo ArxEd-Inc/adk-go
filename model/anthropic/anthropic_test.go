@@ -99,8 +99,8 @@ func TestConvertRequestBudgetModeThinking(t *testing.T) {
 	if params.Thinking.OfEnabled == nil {
 		t.Fatalf("thinking not in budget_tokens form")
 	}
-	if got := params.Thinking.OfEnabled.BudgetTokens; got != 10000 {
-		t.Fatalf("budget_tokens = %d, want 10000", got)
+	if got := params.Thinking.OfEnabled.BudgetTokens; got != 24000 {
+		t.Fatalf("budget_tokens = %d, want 24000", got)
 	}
 	if params.Thinking.OfAdaptive != nil {
 		t.Fatalf("budget mode emitted adaptive thinking")
