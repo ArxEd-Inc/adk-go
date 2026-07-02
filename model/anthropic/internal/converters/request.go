@@ -19,6 +19,7 @@
 package converters
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -318,14 +319,20 @@ func functionResponseToBlock(resp *genai.FunctionResponse, sanitizer *toolUseIDS
 		return nil, nil
 	}
 
-	// Convert the response to JSON string
+	// Convert the response to JSON string. Keep `&`, `<`, and `>` literal:
+	// the JSON is read by a model rather than embedded in HTML, and the
+	// six-byte escape sequences json.Marshal applies to those characters by
+	// default inflate URL-heavy tool results.
 	var content string
 	if resp.Response != nil {
-		jsonBytes, err := json.Marshal(resp.Response)
-		if err != nil {
+		var jsonBuffer bytes.Buffer
+		encoder := json.NewEncoder(&jsonBuffer)
+		encoder.SetEscapeHTML(false)
+		if err := encoder.Encode(resp.Response); err != nil {
 			return nil, fmt.Errorf("failed to marshal function response: %w", err)
 		}
-		content = string(jsonBytes)
+		// Encode appends a trailing newline after the value.
+		content = strings.TrimSuffix(jsonBuffer.String(), "\n")
 	}
 
 	// Sanitize the tool-use ID to Anthropic's required shape, consistently with
