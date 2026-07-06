@@ -654,15 +654,6 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 
 // findActiveTaskIsolationScope returns the most recent isolation_scope that has
 // not yet been closed by a successful finish_task FunctionResponse.
-//
-// An unscoped agent-authored content event encountered before any open scope also
-// ends the walk: a paused task awaiting the user's reply is always the session's
-// last speaker, so an unscoped agent turn above the scoped events means the scoped
-// dispatch completed and control returned to an unscoped agent. Without this stop,
-// a scoped dispatch that finishes without a finish_task response — e.g. a scoped
-// single_turn child run via workflow.RunNode(WithIsolationScopeFromNodePath) —
-// would permanently capture every subsequent user message in the session, scoping
-// them to a dispatch that can never read them.
 func findActiveTaskIsolationScope(sess session.Session) string {
 	if sess == nil {
 		return ""
@@ -671,13 +662,7 @@ func findActiveTaskIsolationScope(sess session.Session) string {
 	finished := map[string]struct{}{}
 	for i := events.Len() - 1; i >= 0; i-- {
 		ev := events.At(i)
-		if ev == nil {
-			continue
-		}
-		if ev.IsolationScope == "" {
-			if ev.Author != "" && ev.Author != "user" && utils.Content(ev) != nil {
-				return ""
-			}
+		if ev == nil || ev.IsolationScope == "" {
 			continue
 		}
 		scope := ev.IsolationScope

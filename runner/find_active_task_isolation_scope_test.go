@@ -145,49 +145,6 @@ func TestFindActiveTaskIsolationScope(t *testing.T) {
 			},
 			want: scopeA,
 		},
-		{
-			// A scoped dispatch that completed without a finish_task FR
-			// (e.g. a scoped single_turn child run via
-			// workflow.RunNode(WithIsolationScopeFromNodePath)) followed
-			// by an unscoped agent turn: control returned to an unscoped
-			// agent, so no task awaits the user's reply. Without the
-			// unscoped-agent-turn stop, the dead child's scope would
-			// capture every subsequent user message in the session.
-			name: "completed_scoped_dispatch_closed_by_unscoped_agent_turn",
-			events: []*session.Event{
-				{Author: "user"},
-				modelEventWithFC(scopeA, "someTool", "fc-A"),
-				{Author: "coordinator", LLMResponse: model.LLMResponse{
-					Content: genai.NewContentFromText("synthesis of the child's result", genai.RoleModel),
-				}},
-			},
-			want: "",
-		},
-		{
-			// An unscoped agent event without content (e.g. state-only
-			// bookkeeping) doesn't prove control returned to an unscoped
-			// agent; the scope stays open.
-			name: "contentless_unscoped_agent_event_keeps_scope_open",
-			events: []*session.Event{
-				modelEventWithFC(scopeA, "confirmation", "fc-A"),
-				{Author: "coordinator"},
-			},
-			want: scopeA,
-		},
-		{
-			// A trailing unscoped USER event doesn't close the scope:
-			// the paused task's question is still the newest agent
-			// activity, and the user's reply is exactly what the
-			// stamping exists to route to it.
-			name: "trailing_user_event_keeps_scope_open",
-			events: []*session.Event{
-				modelEventWithFC(scopeA, "confirmation", "fc-A"),
-				{Author: "user", LLMResponse: model.LLMResponse{
-					Content: genai.NewContentFromText("here you go", genai.RoleUser),
-				}},
-			},
-			want: scopeA,
-		},
 	}
 
 	for _, tc := range tests {
