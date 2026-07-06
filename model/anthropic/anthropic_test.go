@@ -21,7 +21,7 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/v2/model"
 )
 
 func ptr[T any](v T) *T { return &v }

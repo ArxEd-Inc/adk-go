@@ -21,9 +21,10 @@ import (
 	"math"
 	"regexp"
 
-	"google.golang.org/adk/internal/configurable"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/configurable"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 type ValidateEmailArgs struct {
@@ -32,11 +33,11 @@ type ValidateEmailArgs struct {
 
 var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
 
-func validateEmail(ctx tool.Context, args ValidateEmailArgs) (bool, error) {
+func validateEmail(ctx agent.Context, args ValidateEmailArgs) (bool, error) {
 	return emailRegex.MatchString(args.Email), nil
 }
 
-func getUserID(ctx tool.Context, args ValidateEmailArgs) (int, error) {
+func getUserID(ctx agent.Context, args ValidateEmailArgs) (int, error) {
 	valid, err := validateEmail(ctx, args)
 	if err != nil {
 		return 0, err
@@ -64,7 +65,7 @@ type CreateBookingArgs struct {
 	Details     string `json:"details"`
 }
 
-func createBooking(ctx tool.Context, args CreateBookingArgs) (map[string]any, error) {
+func createBooking(ctx agent.Context, args CreateBookingArgs) (map[string]any, error) {
 	return map[string]any{
 		"user_id":           args.UserID,
 		"is_confirmed":      args.IsConfirmed,
@@ -76,10 +77,10 @@ func createBooking(ctx tool.Context, args CreateBookingArgs) (map[string]any, er
 }
 
 type FlightPreferences struct {
-	CabinClass       string `json:"cabin_class"`
-	MaxStops         int    `json:"max_stops"`
-	PreferredAirline string `json:"preferred_airline"`
-	FlexibleDates    bool   `json:"flexible_dates"`
+	CabinClass       string  `json:"cabin_class"`
+	MaxStops         int     `json:"max_stops"`
+	PreferredAirline *string `json:"preferred_airline"`
+	FlexibleDates    bool    `json:"flexible_dates"`
 }
 
 type TripDetails struct {
@@ -94,10 +95,10 @@ type SearchFlightsArgs struct {
 	Preferences *FlightPreferences `json:"preferences"`
 }
 
-func searchFlights(ctx tool.Context, args SearchFlightsArgs) (map[string]any, error) {
+func searchFlights(ctx agent.Context, args SearchFlightsArgs) (map[string]any, error) {
 	if args.Preferences == nil {
 		args.Preferences = &FlightPreferences{
-			CabinClass:    "Economy",
+			CabinClass:    "economy",
 			MaxStops:      1,
 			FlexibleDates: false,
 		}
@@ -120,9 +121,9 @@ func searchFlights(ctx tool.Context, args SearchFlightsArgs) (map[string]any, er
 		"search_status":     "completed",
 	}
 
-	airline := args.Preferences.PreferredAirline
-	if airline == "" {
-		airline = "Various Airlines"
+	airline := "Various Airlines"
+	if args.Preferences.PreferredAirline != nil && *args.Preferences.PreferredAirline != "" {
+		airline = *args.Preferences.PreferredAirline
 	}
 
 	stopsDesc := "direct"
@@ -152,7 +153,7 @@ type CalculateTripCostArgs struct {
 	BaggageCount  *int    `json:"baggage_count"`
 }
 
-func calculateTripCost(ctx tool.Context, args CalculateTripCostArgs) (map[string]any, error) {
+func calculateTripCost(ctx agent.Context, args CalculateTripCostArgs) (map[string]any, error) {
 	// Handle Python's default num_passengers=1 logic
 	// In Go, if the caller passes 0, we should ensure at least 1
 	// or handle it based on your specific business logic.
@@ -200,7 +201,7 @@ type reimburseArgs struct {
 	Amount  float64 `json:"amount"`
 }
 
-func reimburse(ctx tool.Context, args reimburseArgs) (map[string]any, error) {
+func reimburse(ctx agent.Context, args reimburseArgs) (map[string]any, error) {
 	return map[string]any{
 		"status": "ok",
 	}, nil
@@ -211,7 +212,7 @@ type askForApprovalArgs struct {
 	Amount  float64 `json:"amount"`
 }
 
-func askForApproval(ctx tool.Context, args askForApprovalArgs) (map[string]any, error) {
+func askForApproval(ctx agent.Context, args askForApprovalArgs) (map[string]any, error) {
 	return map[string]any{
 		"status":   "pending",
 		"amount":   args.Amount,

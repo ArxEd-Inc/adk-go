@@ -26,7 +26,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/v2/model"
 )
 
 // redactedThinkingMarker prefixes an Anthropic redacted_thinking block's encrypted Data when it is carried back in a

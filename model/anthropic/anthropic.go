@@ -29,8 +29,8 @@ import (
 	"golang.org/x/oauth2/google"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/model/anthropic/internal/converters"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/model/anthropic/internal/converters"
 )
 
 const defaultMaxTokens = 16384

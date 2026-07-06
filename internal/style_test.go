@@ -54,6 +54,10 @@ func TestCopyrightHeader(t *testing.T) {
 		"internal/util":       true,
 		// The following was copied from golang.org/x/oscar.
 		"internal/httprr": true,
+		// Vendored from github.com/Alcova-AI/adk-anthropic-go pending upstream
+		// Anthropic support (https://github.com/google/adk-go/issues/225), so it
+		// carries that project's attribution rather than this header.
+		"model/anthropic": true,
 		// Contains vendored dependencies, not subject to copyright checks.
 		"vendor": true,
 	}

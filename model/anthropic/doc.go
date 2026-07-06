@@ -33,6 +33,6 @@
 // ANTHROPIC_USE_VERTEX), but only the Vertex AI path is exercised.
 //
 // TODO(#225): replace this package with the upstream
-// google.golang.org/adk/model/anthropic once google/adk-go merges Anthropic
+// google.golang.org/adk/v2/model/anthropic once google/adk-go merges Anthropic
 // support (PR #598 / #233). https://github.com/google/adk-go/issues/225
 package anthropic
