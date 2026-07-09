@@ -71,9 +71,7 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 		}
 		state := llminternal.Reveal(llmA)
 
-		if state.Mode == llminternal.ModeUnset {
-			state.Mode = llminternal.ModeSingleTurn
-		}
+		state.EnsureMode(llminternal.ModeSingleTurn)
 		switch state.Mode {
 		case llminternal.ModeTask, llminternal.ModeSingleTurn, llminternal.ModeChat:
 		default:
@@ -82,9 +80,6 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 			return
 		}
 
-		if state.Mode == llminternal.ModeSingleTurn {
-			state.IncludeContents = "none"
-		}
 		// Task/single_turn modes build a per-agent InvocationContext that:
 		//   - rebinds Agent to a (matching adk-python's ic.agent=agent),
 		//   - threads isolation_scope so the content processor

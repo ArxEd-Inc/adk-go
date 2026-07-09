@@ -15,6 +15,8 @@
 package llminternal
 
 import (
+	"sync"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -60,6 +62,9 @@ type State struct {
 	OutputSchema *genai.Schema
 
 	OutputKey string
+
+	// ensureModeOnce guards EnsureMode's lazy writes to Mode and IncludeContents.
+	ensureModeOnce sync.Once
 }
 
 type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
@@ -67,3 +72,19 @@ type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
 func (s *State) internal() *State { return s }
 
 func Reveal(a Agent) *State { return a.internal() }
+
+// EnsureMode defaults an unset Mode to fallback and pins IncludeContents to
+// "none" for single_turn agents, exactly once. Node construction and node
+// dispatch resolve the mode lazily, and the same agent can be dispatched
+// concurrently (e.g. parallel function calls in one model turn), so these
+// writes must be synchronized.
+func (s *State) EnsureMode(fallback Mode) {
+	s.ensureModeOnce.Do(func() {
+		if s.Mode == ModeUnset {
+			s.Mode = fallback
+		}
+		if s.Mode == ModeSingleTurn {
+			s.IncludeContents = "none"
+		}
+	})
+}
