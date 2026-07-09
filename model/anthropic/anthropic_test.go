@@ -15,7 +15,9 @@
 package anthropic
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -157,5 +159,41 @@ func TestConvertRequestResponseJsonSchema(t *testing.T) {
 	}
 	if properties, ok := schema["properties"].(map[string]any); !ok || properties["name"] == nil {
 		t.Errorf("output format schema lost its properties: %v", schema)
+	}
+}
+
+// TestGenerateContentWrapsConversionFailureWithErrRequestConversion: a request
+// the converter rejects — here inline data of a MIME type Anthropic doesn't
+// accept — fails with an error wrapping ErrRequestConversion on both the
+// streaming and non-streaming paths, so callers can recognize the failure as
+// permanent rather than retrying it.
+func TestGenerateContentWrapsConversionFailureWithErrRequestConversion(t *testing.T) {
+	cases := []struct {
+		name   string
+		stream bool
+	}{
+		{"non-streaming", false},
+		{"streaming", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &anthropicModel{name: "claude-sonnet-4-6", defaultMaxTokens: 64000}
+			req := &model.LLMRequest{
+				Contents: []*genai.Content{{
+					Role: "user",
+					Parts: []*genai.Part{{
+						InlineData: &genai.Blob{Data: []byte("<html></html>"), MIMEType: "text/html"},
+					}},
+				}},
+			}
+
+			var gotErr error
+			for _, err := range m.GenerateContent(context.Background(), req, tc.stream) {
+				gotErr = err
+			}
+			if !errors.Is(gotErr, ErrRequestConversion) {
+				t.Fatalf("GenerateContent error = %v, want an error wrapping ErrRequestConversion", gotErr)
+			}
+		})
 	}
 }

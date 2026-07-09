@@ -19,6 +19,7 @@ package anthropic
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"os"
@@ -34,6 +35,11 @@ import (
 )
 
 const defaultMaxTokens = 16384
+
+// ErrRequestConversion marks a failure to convert a [model.LLMRequest] into Anthropic's request format, raised
+// before any API call is made. Conversion is deterministic — the same request fails the same way on every attempt —
+// so callers should treat errors wrapping it as permanent rather than retrying.
+var ErrRequestConversion = errors.New("failed to convert request")
 
 // cloudPlatformScope is the OAuth scope Vertex AI requires, passed explicitly when loading Application
 // Default Credentials. Without an explicit scope, credentials that mint tokens by service-account
@@ -184,7 +190,7 @@ func (m *anthropicModel) GenerateContent(ctx context.Context, req *model.LLMRequ
 func (m *anthropicModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	params, toolKeyAliases, err := m.convertRequest(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert request: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrRequestConversion, err)
 	}
 
 	// Accumulate a streaming response rather than calling the non-streaming endpoint. The latter is
@@ -218,7 +224,7 @@ func (m *anthropicModel) generateStream(ctx context.Context, req *model.LLMReque
 	return func(yield func(*model.LLMResponse, error) bool) {
 		params, toolKeyAliases, err := m.convertRequest(req)
 		if err != nil {
-			yield(nil, fmt.Errorf("failed to convert request: %w", err))
+			yield(nil, fmt.Errorf("%w: %w", ErrRequestConversion, err))
 			return
 		}
 
