@@ -29,6 +29,22 @@ import (
 	"google.golang.org/adk/v2/model"
 )
 
+// CustomMetadata keys under which MessageToLLMResponse reports Anthropic cache-write token counts.
+// genai.GenerateContentResponseUsageMetadata has no cache-write field — UsageToMetadata folds cache-creation
+// tokens into PromptTokenCount — so the per-class breakdown needed for cost accounting travels in
+// model.LLMResponse.CustomMetadata instead. The public accessor is CacheCreationInputTokensFromResponse in the
+// parent anthropic package, which also re-exports these keys.
+const (
+	// CacheCreationInputTokensKey holds Usage.CacheCreationInputTokens: the total input tokens written to cache.
+	CacheCreationInputTokensKey = "anthropic_cache_creation_input_tokens"
+	// CacheCreationEphemeral5mInputTokensKey holds Usage.CacheCreation.Ephemeral5mInputTokens: the input tokens
+	// written to 5-minute-TTL cache entries.
+	CacheCreationEphemeral5mInputTokensKey = "anthropic_cache_creation_ephemeral_5m_input_tokens"
+	// CacheCreationEphemeral1hInputTokensKey holds Usage.CacheCreation.Ephemeral1hInputTokens: the input tokens
+	// written to 1-hour-TTL cache entries.
+	CacheCreationEphemeral1hInputTokensKey = "anthropic_cache_creation_ephemeral_1h_input_tokens"
+)
+
 // redactedThinkingMarker prefixes an Anthropic redacted_thinking block's encrypted Data when it is carried back in a
 // genai.Part's ThoughtSignature. ThoughtSignature is the only opaque per-Part field that survives the Vertex AI
 // session backend (PartMetadata is dropped there), so it doubles as the carrier for redacted thinking; the marker lets
@@ -86,6 +102,15 @@ func MessageToLLMResponse(msg *anthropic.Message, toolKeyAliases map[string]stri
 		Content:       content,
 		UsageMetadata: UsageToMetadata(msg.Usage),
 		FinishReason:  StopReasonToFinishReason(msg.StopReason),
+		ModelVersion:  string(msg.Model),
+	}
+
+	if msg.Usage.CacheCreationInputTokens > 0 {
+		resp.CustomMetadata = map[string]any{
+			CacheCreationInputTokensKey:            msg.Usage.CacheCreationInputTokens,
+			CacheCreationEphemeral5mInputTokensKey: msg.Usage.CacheCreation.Ephemeral5mInputTokens,
+			CacheCreationEphemeral1hInputTokensKey: msg.Usage.CacheCreation.Ephemeral1hInputTokens,
+		}
 	}
 
 	if len(allCitations) > 0 {

@@ -496,6 +496,57 @@ func TestContentsToMessagesParallelToolCallsCorrelate(t *testing.T) {
 	}
 }
 
+// TestMessageToLLMResponseUsage covers the usage mapping on the response path: ModelVersion is carried over
+// (parity with the Gemini path), UsageToMetadata folds all input classes into PromptTokenCount with cache reads
+// as the cached subset, and cache-write counts — which genai usage metadata cannot represent — surface in
+// CustomMetadata with their per-TTL breakdown, present only when the response actually wrote to cache.
+func TestMessageToLLMResponseUsage(t *testing.T) {
+	msg := &anthropic.Message{
+		Model: "claude-sonnet-4-6",
+		Usage: anthropic.Usage{
+			InputTokens:              100,
+			OutputTokens:             50,
+			CacheReadInputTokens:     1000,
+			CacheCreationInputTokens: 300,
+			CacheCreation: anthropic.CacheCreation{
+				Ephemeral5mInputTokens: 200,
+				Ephemeral1hInputTokens: 100,
+			},
+		},
+	}
+	resp, err := MessageToLLMResponse(msg, nil)
+	if err != nil {
+		t.Fatalf("MessageToLLMResponse: %v", err)
+	}
+	if resp.ModelVersion != "claude-sonnet-4-6" {
+		t.Errorf("ModelVersion = %q, want %q", resp.ModelVersion, "claude-sonnet-4-6")
+	}
+	usage := resp.UsageMetadata
+	if usage.PromptTokenCount != 1400 || usage.CandidatesTokenCount != 50 || usage.TotalTokenCount != 1450 || usage.CachedContentTokenCount != 1000 {
+		t.Errorf("UsageMetadata = %+v, want prompt=1400 candidates=50 total=1450 cached=1000", usage)
+	}
+	wantMetadata := map[string]any{
+		CacheCreationInputTokensKey:            int64(300),
+		CacheCreationEphemeral5mInputTokensKey: int64(200),
+		CacheCreationEphemeral1hInputTokensKey: int64(100),
+	}
+	for key, want := range wantMetadata {
+		if got := resp.CustomMetadata[key]; got != want {
+			t.Errorf("CustomMetadata[%q] = %v (%T), want %v", key, got, got, want)
+		}
+	}
+
+	msg.Usage.CacheCreationInputTokens = 0
+	msg.Usage.CacheCreation = anthropic.CacheCreation{}
+	resp, err = MessageToLLMResponse(msg, nil)
+	if err != nil {
+		t.Fatalf("MessageToLLMResponse (no cache writes): %v", err)
+	}
+	if resp.CustomMetadata != nil {
+		t.Errorf("CustomMetadata = %v, want nil when nothing was written to cache", resp.CustomMetadata)
+	}
+}
+
 // TestStopReasonToFinishReason covers the refusal mapping (and the common cases).
 func TestStopReasonToFinishReason(t *testing.T) {
 	cases := map[anthropic.StopReason]genai.FinishReason{
