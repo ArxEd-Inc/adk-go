@@ -25,8 +25,10 @@
 // reject adaptive thinking (selected per model via Config.ThinkingMode); tool-use
 // IDs are sanitized to Anthropic's required shape; tool input schemas resolve a root
 // $ref and alias over-long top-level property keys; non-streaming requests are
-// issued as streaming internally (Vertex rejects large non-streaming calls); the
-// refusal stop reason is surfaced; and redacted thinking is round-tripped
+// issued as streaming internally (Vertex rejects large non-streaming calls); a
+// refusal (HTTP 200 with stop_reason "refusal", from the newer models' safety
+// classifiers or the model itself) is surfaced as an error response carrying its
+// stop_details rather than as a silent empty turn; and redacted thinking is round-tripped
 // faithfully (its data rides in the thought signature), while a thought that
 // cannot be replayed is an error rather than silently dropped. Both the Vertex AI
 // and direct Anthropic API backends are selectable via [Config] (Variant /

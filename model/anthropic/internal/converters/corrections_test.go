@@ -547,6 +547,98 @@ func TestMessageToLLMResponseUsage(t *testing.T) {
 	}
 }
 
+// TestMessageToLLMResponseRefusal covers the refusal error surfacing: a refusal must come back as an
+// error response (ErrorCode/ErrorMessage set from StopDetails, Content nil when empty) rather than a
+// normal empty model turn, while a mid-stream refusal keeps its partial parts, and non-refusal stop
+// reasons keep an empty Content non-nil with no error fields.
+func TestMessageToLLMResponseRefusal(t *testing.T) {
+	tests := []struct {
+		name             string
+		msg              *anthropic.Message
+		wantErrorMessage string
+		wantParts        int
+		wantNilContent   bool
+	}{
+		{
+			name: "refusal with empty content",
+			msg: &anthropic.Message{
+				Model:      "claude-opus-5",
+				StopReason: anthropic.StopReasonRefusal,
+				StopDetails: anthropic.RefusalStopDetails{
+					Category:    anthropic.RefusalStopDetailsCategoryCyber,
+					Explanation: "request declined by safety classifier",
+				},
+			},
+			wantErrorMessage: "Anthropic refused the request (category: cyber): request declined by safety classifier",
+			wantNilContent:   true,
+		},
+		{
+			name: "mid-stream refusal keeps partial content",
+			msg: &anthropic.Message{
+				Model:      "claude-opus-5",
+				StopReason: anthropic.StopReasonRefusal,
+				StopDetails: anthropic.RefusalStopDetails{
+					Category: anthropic.RefusalStopDetailsCategoryCyber,
+				},
+				Content: []anthropic.ContentBlockUnion{
+					{Type: "text", Text: "partial output before the classifier fired"},
+				},
+			},
+			wantErrorMessage: "Anthropic refused the request (category: cyber)",
+			wantParts:        1,
+		},
+		{
+			name: "refusal with zero-value stop details",
+			msg: &anthropic.Message{
+				Model:      "claude-opus-5",
+				StopReason: anthropic.StopReasonRefusal,
+			},
+			wantErrorMessage: "Anthropic refused the request",
+			wantNilContent:   true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resp, err := MessageToLLMResponse(test.msg, nil)
+			if err != nil {
+				t.Fatalf("MessageToLLMResponse: %v", err)
+			}
+			if resp.ErrorCode != string(genai.FinishReasonSafety) {
+				t.Errorf("ErrorCode = %q, want %q", resp.ErrorCode, genai.FinishReasonSafety)
+			}
+			if resp.ErrorMessage != test.wantErrorMessage {
+				t.Errorf("ErrorMessage = %q, want %q", resp.ErrorMessage, test.wantErrorMessage)
+			}
+			if resp.FinishReason != genai.FinishReasonSafety {
+				t.Errorf("FinishReason = %q, want %q", resp.FinishReason, genai.FinishReasonSafety)
+			}
+			if test.wantNilContent {
+				if resp.Content != nil {
+					t.Errorf("Content = %+v, want nil for an empty refusal", resp.Content)
+				}
+			} else if got := len(resp.Content.Parts); got != test.wantParts {
+				t.Errorf("len(Content.Parts) = %d, want %d", got, test.wantParts)
+			}
+		})
+	}
+
+	// A non-refusal stop reason with no content stays a normal turn: Content non-nil (zero parts) and no
+	// error fields, so empty-but-successful responses are not misreported as failures.
+	resp, err := MessageToLLMResponse(&anthropic.Message{
+		Model:      "claude-opus-5",
+		StopReason: anthropic.StopReasonEndTurn,
+	}, nil)
+	if err != nil {
+		t.Fatalf("MessageToLLMResponse (end_turn): %v", err)
+	}
+	if resp.Content == nil || len(resp.Content.Parts) != 0 {
+		t.Errorf("Content = %+v, want non-nil with zero parts on end_turn", resp.Content)
+	}
+	if resp.ErrorCode != "" || resp.ErrorMessage != "" {
+		t.Errorf("ErrorCode/ErrorMessage = %q/%q, want empty on end_turn", resp.ErrorCode, resp.ErrorMessage)
+	}
+}
+
 // TestStopReasonToFinishReason covers the refusal mapping (and the common cases).
 func TestStopReasonToFinishReason(t *testing.T) {
 	cases := map[anthropic.StopReason]genai.FinishReason{

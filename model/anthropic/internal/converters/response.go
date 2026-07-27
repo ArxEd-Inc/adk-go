@@ -105,6 +105,19 @@ func MessageToLLMResponse(msg *anthropic.Message, toolKeyAliases map[string]stri
 		ModelVersion:  string(msg.Model),
 	}
 
+	if msg.StopReason == anthropic.StopReasonRefusal {
+		// A refusal is a successful HTTP response that the safety classifiers (or the model) declined to
+		// complete, possibly before any content was generated. Mirror Genai2LLMResponse's blocked-response
+		// shape — ErrorCode set, Content nil when empty — so downstream treats the turn as an error rather
+		// than a normal (possibly empty) model turn; a mid-stream refusal keeps its partial parts alongside
+		// the error fields, matching the Gemini stream aggregator.
+		resp.ErrorCode = string(resp.FinishReason)
+		resp.ErrorMessage = refusalErrorMessage(msg.StopDetails)
+		if len(content.Parts) == 0 {
+			resp.Content = nil
+		}
+	}
+
 	if msg.Usage.CacheCreationInputTokens > 0 {
 		resp.CustomMetadata = map[string]any{
 			CacheCreationInputTokensKey:            msg.Usage.CacheCreationInputTokens,
@@ -118,6 +131,21 @@ func MessageToLLMResponse(msg *anthropic.Message, toolKeyAliases map[string]stri
 	}
 
 	return resp, nil
+}
+
+// refusalErrorMessage renders a refusal's StopDetails for an LLMResponse ErrorMessage. StopDetails is
+// populated only on stop_reason "refusal", and both fields are optional even then: Category is an
+// open-ended classifier category (e.g. "cyber") that plain model refusals omit, and Explanation may be
+// empty.
+func refusalErrorMessage(details anthropic.RefusalStopDetails) string {
+	message := "Anthropic refused the request"
+	if details.Category != "" {
+		message += fmt.Sprintf(" (category: %s)", details.Category)
+	}
+	if details.Explanation != "" {
+		message += ": " + details.Explanation
+	}
+	return message
 }
 
 // restoreAliasedKeys renames any top-level key in args that was aliased for the tool schema back to
