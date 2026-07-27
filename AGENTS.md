@@ -23,6 +23,8 @@ Run from the repo root. These match what CI enforces (CI also passes `-v`):
 - Tidy check:  `go mod tidy -diff`   (must print nothing)
 - Format:      `golangci-lint fmt`   (applies gofumpt + goimports per config)
 
+**Local Development**: Contributors should use `go work init && go work use -r .` to set up their local workspaces.
+
 ## Definition of done
 
 A change is complete only when all of these pass locally:
@@ -36,8 +38,9 @@ A change is complete only when all of these pass locally:
 
 ## Repository layout
 
-- `agent/`     Agent interface + types (`llmagent`, `workflowagents`, `remoteagent`)
+- `agent/`     Agent interface + types (`llmagent`, `workflowagent(s)`, `remoteagent`)
 - `runner/`    Execution engine that drives the run loop
+- `workflow/`  Node/graph-based workflow engine for multi-agent apps
 - `model/`     LLM abstraction (`gemini`, `apigee`)
 - `tool/`      Tool/Toolset interface + built-in tools (incl. `skilltoolset/`, `mcptoolset/`)
 - `session/`   Conversation state + events
@@ -46,6 +49,7 @@ A change is complete only when all of these pass locally:
 - `server/`    HTTP servers (`adkrest` is primary; `adka2a`, `agentengine`)
 - `cmd/`       CLI (`adkgo`) and server launchers
 - `telemetry/`, `util/`   Public helper packages
+- `platform/`  Overridable seams for time & UUID generation (deterministic tests)
 - `internal/`  Private packages — NOT public API; `internal/httprr` is vendored
 - `examples/`  Runnable example agents (quickstart, tools, a2a, skills, …)
 
@@ -101,6 +105,10 @@ See `examples/quickstart` for a full runnable program.
   directly.
 - **Add cross-cutting behavior:** register a `plugin.New(plugin.Config{...})`
   hook (`Before*`/`After*` for run/agent/model/tool) instead of editing the loop.
+
+## Multi-Module Development
+
+See the [Multi-Module Development](CONTRIBUTING.md#multi-module-development) section in `CONTRIBUTING.md` for policy, steps to add a new module, and release tagging information.
 
 ## Testing
 
