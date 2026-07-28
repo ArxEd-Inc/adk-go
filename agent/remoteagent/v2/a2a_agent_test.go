@@ -125,6 +125,20 @@ func newInvocationContextWithStreamingMode(t *testing.T, events []*session.Event
 	return ic
 }
 
+func newScopedInvocationContext(t *testing.T, events []*session.Event, isolationScope string, userContent *genai.Content) agent.InvocationContext {
+	t.Helper()
+	ctx := t.Context()
+	session := prepareSession(t, ctx, events)
+	return icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Session:        session,
+		IsolationScope: isolationScope,
+		UserContent:    userContent,
+		RunConfig: &agent.RunConfig{
+			StreamingMode: agent.StreamingModeSSE,
+		},
+	})
+}
+
 func runAndCollect(ic agent.InvocationContext, agnt agent.Agent) ([]*session.Event, error) {
 	var collected []*session.Event
 	for ev, err := range agnt.Run(ic) {
@@ -913,9 +927,11 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 func TestRemoteAgent_RequestPayload(t *testing.T) {
 	remoteAgentName, notRemoteAgentName := "a2a", "not-a2a"
 	testCases := []struct {
-		name          string
-		sessionEvents []*session.Event
-		wantRequest   *a2a.SendMessageRequest
+		name           string
+		sessionEvents  []*session.Event
+		isolationScope string
+		userContent    *genai.Content
+		wantRequest    *a2a.SendMessageRequest
 	}{
 		{
 			name:          "only user message",
@@ -982,6 +998,47 @@ func TestRemoteAgent_RequestPayload(t *testing.T) {
 						a2a.NewTextPart("For context:"),
 						a2a.NewTextPart(fmt.Sprintf("[%s] said: resp3", notRemoteAgentName)),
 					},
+				},
+			},
+		},
+		{
+			name: "isolation-scoped invocation sends only its user content",
+			sessionEvents: []*session.Event{
+				newUserHello(),
+				{
+					Author: notRemoteAgentName,
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("hi", genai.RoleModel),
+					},
+				},
+			},
+			isolationScope: remoteAgentName + "@run-1",
+			userContent:    genai.NewContentFromText("scoped task input", genai.RoleUser),
+			wantRequest: &a2a.SendMessageRequest{
+				Message: &a2a.Message{
+					Role:  a2a.MessageRoleUser,
+					Parts: a2a.ContentParts{a2a.NewTextPart("scoped task input")},
+				},
+			},
+		},
+		{
+			name: "isolation-scoped invocation ignores prior remote context",
+			sessionEvents: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("msg1", genai.RoleUser)}},
+				{
+					Author: remoteAgentName,
+					LLMResponse: model.LLMResponse{
+						Content:        genai.NewContentFromText("resp1", genai.RoleModel),
+						CustomMetadata: adka2a.ToCustomMetadata("task-9", "ctx-9"),
+					},
+				},
+			},
+			isolationScope: remoteAgentName + "@run-2",
+			userContent:    genai.NewContentFromText("another scoped task", genai.RoleUser),
+			wantRequest: &a2a.SendMessageRequest{
+				Message: &a2a.Message{
+					Role:  a2a.MessageRoleUser,
+					Parts: a2a.ContentParts{a2a.NewTextPart("another scoped task")},
 				},
 			},
 		},
@@ -1063,7 +1120,7 @@ func TestRemoteAgent_RequestPayload(t *testing.T) {
 				t.Fatalf("remoteagent.NewA2A() error = %v", err)
 			}
 
-			ictx := newInvocationContext(t, tc.sessionEvents)
+			ictx := newScopedInvocationContext(t, tc.sessionEvents, tc.isolationScope, tc.userContent)
 			if _, err := runAndCollect(ictx, remoteAgent); !errors.Is(err, errRejected) {
 				t.Fatalf("agent.Run() error = %v, want %v", err, errRejected)
 			}
@@ -1076,6 +1133,57 @@ func TestRemoteAgent_RequestPayload(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewMessage_IsolationScoped(t *testing.T) {
+	t.Run("empty user content produces an empty message", func(t *testing.T) {
+		ictx := newScopedInvocationContext(t, []*session.Event{newUserHello()}, "remote@run-1", nil)
+		msg, err := newMessage(ictx, A2AConfig{})
+		if err != nil {
+			t.Fatalf("newMessage() error = %v", err)
+		}
+		if len(msg.Parts) != 0 {
+			t.Errorf("newMessage() parts = %v, want empty", msg.Parts)
+		}
+		if msg.TaskID != "" || msg.ContextID != "" {
+			t.Errorf("newMessage() taskID = %q, contextID = %q, want both empty", msg.TaskID, msg.ContextID)
+		}
+	})
+
+	t.Run("user function call response takes precedence over the scope", func(t *testing.T) {
+		events := []*session.Event{
+			{
+				Author: "remote",
+				LLMResponse: model.LLMResponse{
+					Content: genai.NewContentFromParts([]*genai.Part{
+						{FunctionCall: &genai.FunctionCall{Name: "fn", ID: "call-1"}},
+					}, genai.RoleModel),
+					CustomMetadata: adka2a.ToCustomMetadata("task-1", "ctx-1"),
+				},
+			},
+			{
+				Author: "user",
+				LLMResponse: model.LLMResponse{
+					Content: genai.NewContentFromParts([]*genai.Part{
+						{FunctionResponse: &genai.FunctionResponse{Name: "fn", ID: "call-1", Response: map[string]any{"status": "approved"}}},
+					}, genai.RoleUser),
+				},
+			},
+		}
+		ictx := newScopedInvocationContext(t, events, "remote@run-1", genai.NewContentFromText("must not appear", genai.RoleUser))
+		msg, err := newMessage(ictx, A2AConfig{})
+		if err != nil {
+			t.Fatalf("newMessage() error = %v", err)
+		}
+		if msg.TaskID != "task-1" || msg.ContextID != "ctx-1" {
+			t.Errorf("newMessage() taskID = %q, contextID = %q, want task-1 and ctx-1", msg.TaskID, msg.ContextID)
+		}
+		for _, part := range msg.Parts {
+			if part.Text() == "must not appear" {
+				t.Error("newMessage() included the user content instead of the function call response")
+			}
+		}
+	})
 }
 
 func TestRemoteAgent_EmptyResultForEmptySession(t *testing.T) {

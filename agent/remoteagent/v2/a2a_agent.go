@@ -357,6 +357,28 @@ func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error
 		return msg, nil
 	}
 
+	// An isolation-scoped invocation (e.g. a workflow-node dispatch via workflow.RunNode with
+	// WithIsolationScope/WithIsolationScopeFromNodePath) must not read out-of-scope session events: per
+	// session.Event.IsolationScope, an event is visible only when its scope matches the agent's scope exactly,
+	// which is how the LLM flow's contents processor filters prompt history for scoped LlmAgents. Mirror that
+	// here by building the message solely from the invocation's seeded UserContent, without inheriting a
+	// task/context ID from out-of-scope remote-agent events — each scoped dispatch is a fresh remote context.
+	if ctx.IsolationScope() != "" {
+		userContent := ctx.UserContent()
+		if userContent == nil || len(userContent.Parts) == 0 {
+			return a2a.NewMessage(a2a.MessageRoleUser), nil
+		}
+		event := session.NewEvent(ctx, ctx.InvocationID())
+		event.Author = "user"
+		event.Content = userContent
+		parts, err := convertParts(ctx, cfg, event)
+		if err != nil {
+			return nil, fmt.Errorf("user content part conversion failed: %w", err)
+		}
+		msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
+		return msg, nil
+	}
+
 	parts, contextID := toMissingRemoteSessionParts(ctx, events, cfg)
 	msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
 	msg.ContextID = contextID
