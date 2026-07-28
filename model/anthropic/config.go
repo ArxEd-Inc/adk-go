@@ -70,14 +70,44 @@ type CacheBreakpoint struct {
 //
 // Anthropic evaluates cache prefixes in order: tools → system → messages.
 // When mixing TTLs, longer TTLs must appear before shorter ones in this order.
-// Maximum 4 explicit breakpoints per request (auto does not count).
+// Anthropic allows at most 4 cache_control markers per request. Auto counts
+// toward that maximum — it results in a marker on the request's last cacheable
+// block — so configuring every breakpoint at once exceeds the limit.
 //
 // See: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
 type PromptCachingConfig struct {
-	Auto                *CacheBreakpoint
-	SystemInstruction   *CacheBreakpoint
-	Tools               *CacheBreakpoint
+	// Auto sets the request's top-level cache_control, which applies a marker
+	// to the last cacheable block in the request.
+	Auto *CacheBreakpoint
+
+	// SystemInstruction places a breakpoint on the last system block, caching
+	// the tool definitions plus the full system prompt.
+	SystemInstruction *CacheBreakpoint
+
+	// Tools places a breakpoint on the last tool definition, caching the full
+	// tool list.
+	Tools *CacheBreakpoint
+
+	// ConversationHistory places a breakpoint on the newest cacheable content
+	// block, searching messages from last to first (thinking blocks cannot
+	// carry cache_control), so each call writes the newest turn to the cache
+	// and reads everything before it.
 	ConversationHistory *CacheBreakpoint
+
+	// ToolsStaticPrefixEnd places a breakpoint on the tool definition named by
+	// ToolsStaticPrefixEndToolName, marking the boundary between a static tool
+	// prefix and tools that may be appended mid-conversation: an append then
+	// invalidates only the tools after the named one instead of the whole
+	// tools prefix. Both fields must be set; when no tool matches the name, no
+	// breakpoint is placed, and when the named tool is also the last tool the
+	// Tools breakpoint overwrites this one (a single marker on the wire). This
+	// is the earliest breakpoint in the request, so its TTL must be >= the
+	// TTLs of the breakpoints after it (see the ordering rule above).
+	ToolsStaticPrefixEnd *CacheBreakpoint
+
+	// ToolsStaticPrefixEndToolName names the tool definition that
+	// ToolsStaticPrefixEnd targets.
+	ToolsStaticPrefixEndToolName string
 }
 
 // Config holds configuration for creating an Anthropic Claude model.
