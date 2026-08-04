@@ -545,6 +545,16 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 		select {
 		case item = <-s.eventQueue:
 		case <-doneChan:
+			// The workflow's own invocation context died — an external
+			// cancellation (caller cancel or timeout), not a
+			// scheduler-initiated sibling cancel. Record it as the
+			// run's error (unless a node failure already claimed the
+			// slot) so a run whose remaining completions all arrive
+			// clean still surfaces the cancellation instead of ending
+			// as a success with part of the graph unexecuted.
+			if pendingErr == nil {
+				pendingErr = externalCancelCause(s.parentCtx)
+			}
 			if !draining {
 				draining = true
 				s.cancelAll()
@@ -755,8 +765,10 @@ func (s *scheduler) handleEvent(it eventItem) {
 // stopped or a node failed), pass scheduleSuccessors=false so the
 // workflow does not keep dispatching new nodes after cancellation.
 //
-// The returned error is the node's own error (NodeFailed); nil on
-// clean success or sibling cancellation.
+// The returned error is the node's own error (NodeFailed) or, for a
+// node cancelled because the workflow's own invocation context died,
+// the external cancellation cause; nil on clean success or sibling
+// cancellation.
 //
 // # Human-input waiting branch
 //
@@ -785,6 +797,21 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 
 	if errors.Is(it.err, context.Canceled) {
 		ns.Status = NodeCancelled
+		// The scheduler itself cancels nodes only via cancelAll —
+		// cancelling the siblings of a failed node (whose own error
+		// surfaces separately) or draining after the caller broke the
+		// range loop. Those cancels are benign. A cancellation while
+		// the workflow's own invocation context is dead came from
+		// outside the scheduler (caller cancel or timeout): there is
+		// no failing sibling whose error will surface, so return the
+		// cause — before the retry block, since retrying under a dead
+		// context just re-fails — or the run would end as a clean
+		// success. Mirrors adk-python, where an external
+		// CancelledError re-raises through the scheduler and only
+		// engine-cancelled tasks park as CANCELLED.
+		if s.parentCtx.Err() != nil {
+			return externalCancelCause(s.parentCtx)
+		}
 		return nil // sibling cancellation; not the original error
 	}
 	// WaitForOutput park: a pause, not a failure, and with no interrupt
@@ -875,6 +902,17 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 		s.scheduleNode(succ.node, succ.input, succ.triggeredBy, succ.branch)
 	}
 	return nil
+}
+
+// externalCancelCause returns the error to surface when the workflow's
+// invocation context has been cancelled from outside the scheduler
+// (caller cancel or timeout): the recorded cancel cause when one was
+// set, else the context's own error.
+func externalCancelCause(ctx context.Context) error {
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+	return ctx.Err()
 }
 
 // successor is the per-target dispatch tuple produced by

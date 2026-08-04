@@ -175,11 +175,104 @@ func TestScheduler_FailedSiblingsCancelled(t *testing.T) {
 	if !errors.Is(gotErr, failErr) {
 		t.Errorf("Run error = %v, want it to wrap %v", gotErr, failErr)
 	}
+	if errors.Is(gotErr, context.Canceled) {
+		t.Errorf("Run error = %v, want the failing node's own error, not the siblings' benign cancellation", gotErr)
+	}
 	if got := a.cancelObserved.Load(); !got {
 		t.Errorf("node A: ctx.Done() not observed (sibling cancellation broken)")
 	}
 	if got := c.cancelObserved.Load(); !got {
 		t.Errorf("node C: ctx.Done() not observed (sibling cancellation broken)")
+	}
+}
+
+// TestScheduler_ExternalCancellationSurfaces verifies that cancelling
+// the workflow's own invocation context fails the run. The
+// cancellation is external — there is no failing sibling whose error
+// will surface separately — so classifying it as a benign sibling
+// cancel would end a run that never finished as a clean success. The
+// node blocks until its context dies, mirroring an in-flight LLM call
+// killed by a request timeout.
+func TestScheduler_ExternalCancellationSurfaces(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+	ctx, cancel := context.WithCancel(mockCtx.Context)
+	mockCtx = mockCtx.WithContext(ctx).(*MockInvocationContext)
+
+	n := newExternallyCancelledNode("n", NodeConfig{})
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	errCh := make(chan error, 1)
+	go func() {
+		var firstErr error
+		for _, err := range w.Run(mockCtx) {
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		errCh <- firstErr
+	}()
+
+	<-n.started
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Run error = %v, want context.Canceled (external cancellation must fail the run, not end it cleanly)", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for workflow to finish")
+	}
+}
+
+// TestScheduler_ExternalCancellationSkipsRetry verifies that a node
+// killed by an external cancellation is not retried: RetryConfig
+// applies to the node's own failures, and re-running under a dead
+// context would just re-fail. The run surfaces the cancellation
+// instead.
+func TestScheduler_ExternalCancellationSkipsRetry(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+	ctx, cancel := context.WithCancel(mockCtx.Context)
+	mockCtx = mockCtx.WithContext(ctx).(*MockInvocationContext)
+
+	cfg := NodeConfig{
+		RetryConfig: &RetryConfig{
+			MaxAttempts:   3,
+			InitialDelay:  1 * time.Millisecond,
+			BackoffFactor: 1.0,
+			Jitter:        0.0,
+			ShouldRetry:   func(err error) bool { return true },
+		},
+	}
+
+	n := newExternallyCancelledNode("n", cfg)
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	errCh := make(chan error, 1)
+	go func() {
+		var firstErr error
+		for _, err := range w.Run(mockCtx) {
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		errCh <- firstErr
+	}()
+
+	<-n.started
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Run error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for workflow to finish")
+	}
+
+	if got := n.calls.Load(); got != 1 {
+		t.Errorf("node calls = %d, want 1 (externally-cancelled node must not be retried)", got)
 	}
 }
 
@@ -418,6 +511,32 @@ func (n *cancelObservingNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.E
 	return func(yield func(*session.Event, error) bool) {
 		<-ctx.Done()
 		n.cancelObserved.Store(true)
+	}
+}
+
+// externallyCancelledNode blocks until its context is cancelled,
+// closing started on first entry and counting calls, so tests can
+// cancel the workflow's own context once the node is mid-flight and
+// assert the node was not retried.
+type externallyCancelledNode struct {
+	BaseNode
+	started chan struct{}
+	calls   atomic.Int32
+}
+
+func newExternallyCancelledNode(name string, cfg NodeConfig) *externallyCancelledNode {
+	return &externallyCancelledNode{
+		BaseNode: NewBaseNode(name, "", cfg),
+		started:  make(chan struct{}),
+	}
+}
+
+func (n *externallyCancelledNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		if n.calls.Add(1) == 1 {
+			close(n.started)
+		}
+		<-ctx.Done()
 	}
 }
 
