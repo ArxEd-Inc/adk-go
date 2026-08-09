@@ -200,7 +200,9 @@ func (m *anthropicModel) generate(ctx context.Context, req *model.LLMRequest) (*
 	stream := m.client.Messages.NewStreaming(ctx, params)
 	message := anthropicsdk.Message{}
 	for stream.Next() {
-		if err := message.Accumulate(stream.Current()); err != nil {
+		event := stream.Current()
+		repairAccumulatedToolInput(&message, event)
+		if err := message.Accumulate(event); err != nil {
 			return nil, fmt.Errorf("failed to accumulate message: %w", err)
 		}
 	}
@@ -235,6 +237,7 @@ func (m *anthropicModel) generateStream(ctx context.Context, req *model.LLMReque
 			event := stream.Current()
 
 			// Accumulate the message
+			repairAccumulatedToolInput(&message, event)
 			if err := message.Accumulate(event); err != nil {
 				yield(nil, fmt.Errorf("failed to accumulate message: %w", err))
 				return
