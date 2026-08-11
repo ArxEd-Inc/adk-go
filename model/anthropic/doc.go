@@ -16,7 +16,7 @@
 // Modified by Litix from github.com/Alcova-AI/adk-anthropic-go (v0.1.18).
 
 // Package anthropic implements the [model.LLM] interface for Anthropic Claude
-// models via Google Cloud Vertex AI.
+// models via the direct Anthropic API or Google Cloud Vertex AI.
 //
 // It is vendored from github.com/Alcova-AI/adk-anthropic-go (v0.1.18, Apache
 // 2.0) and adapted to the ADK's model/<provider> layout, then corrected for the
@@ -32,7 +32,7 @@
 // faithfully (its data rides in the thought signature), while a thought that
 // cannot be replayed is an error rather than silently dropped. Both the Vertex AI
 // and direct Anthropic API backends are selectable via [Config] (Variant /
-// ANTHROPIC_USE_VERTEX), but only the Vertex AI path is exercised.
+// ANTHROPIC_USE_VERTEX); both paths are exercised.
 //
 // TODO(#225): replace this package with the upstream
 // google.golang.org/adk/v2/model/anthropic once google/adk-go merges Anthropic
