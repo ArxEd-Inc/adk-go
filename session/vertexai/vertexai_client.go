@@ -254,6 +254,24 @@ func (c *vertexAiClient) deleteSession(ctx context.Context, req *session.DeleteR
 	return lro.Wait(ctx)
 }
 
+// clientEventIDMetadataKey is the CustomMetadata key under which appendEvent preserves the event's client-minted
+// ID across the Vertex round trip. AppendEvent returns no server-assigned ID (AppendEventResponse is empty) and
+// reads report a server-assigned numeric ID, so without the stamp the same event carries different IDs before and
+// after persistence — breaking any consumer that correlates events it saw yielded live against a later session
+// read. listSessionEvents restores the stamped value as the event's ID (and strips the key from the restored
+// CustomMetadata), so the round trip is identity for stamped events; events written before stamping existed, or
+// by other writers, keep their server-assigned IDs.
+const clientEventIDMetadataKey = "adkEventId"
+
+// stampedClientEventID returns the client event ID appendEvent stamped into the given metadata, or "" when none
+// is present.
+func stampedClientEventID(metadata *aiplatformpb.EventMetadata) string {
+	if metadata == nil || metadata.CustomMetadata == nil {
+		return ""
+	}
+	return metadata.CustomMetadata.Fields[clientEventIDMetadataKey].GetStringValue()
+}
+
 func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID string, event *session.Event) error {
 	// ignore partial events
 	if event.Partial {
@@ -278,6 +296,14 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID str
 	metadata, err := createAiplatformpbMetadata(event)
 	if err != nil {
 		return fmt.Errorf("error creating metadata: %w", err)
+	}
+	// Stamp the client-minted event ID into the serialized metadata (never into the caller's event, whose
+	// in-memory CustomMetadata must not change) so reads can restore it — see clientEventIDMetadataKey.
+	if event.ID != "" {
+		if metadata.CustomMetadata == nil {
+			metadata.CustomMetadata = &structpb.Struct{Fields: map[string]*structpb.Value{}}
+		}
+		metadata.CustomMetadata.Fields[clientEventIDMetadataKey] = structpb.NewStringValue(event.ID)
 	}
 
 	// The legacy column-backed fields are still written below as a fallback
@@ -404,8 +430,14 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 			if err != nil {
 				return nil, fmt.Errorf("error fetching session events: %w", err)
 			}
-			// Identity fields are authoritative on the envelope.
+			// Identity fields are authoritative on the envelope — except the ID, where the stamped
+			// client ID wins when present (see clientEventIDMetadataKey). The blob's own id field is
+			// deliberately not consulted: keying on the stamp keeps pre-stamp events on the
+			// server-assigned IDs they have always presented.
 			event.ID = id
+			if stampedID := stampedClientEventID(rpcResp.EventMetadata); stampedID != "" {
+				event.ID = stampedID
+			}
 			event.Timestamp = rpcResp.Timestamp.AsTime()
 			event.InvocationID = rpcResp.InvocationId
 			event.Author = rpcResp.Author
@@ -435,6 +467,15 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 			event.GroundingMetadata = createGroundingMetadata(rpcResp.EventMetadata.GroundingMetadata)
 			if rpcResp.EventMetadata.CustomMetadata != nil {
 				event.CustomMetadata = rpcResp.EventMetadata.CustomMetadata.AsMap()
+				// Restore the stamped client ID and strip the stamp, so the round trip is identity —
+				// including CustomMetadata reverting to nil when the stamp was its only entry.
+				if stampedID := stampedClientEventID(rpcResp.EventMetadata); stampedID != "" {
+					event.ID = stampedID
+					delete(event.CustomMetadata, clientEventIDMetadataKey)
+					if len(event.CustomMetadata) == 0 {
+						event.CustomMetadata = nil
+					}
+				}
 			}
 		}
 		events = append(events, event)

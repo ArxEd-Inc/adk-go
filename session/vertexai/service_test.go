@@ -27,6 +27,7 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/sessiontestsuite"
@@ -220,6 +221,25 @@ func setupReplay(t *testing.T, filename string) ([]option.ClientOption, func(), 
 		rep, err := rpcreplay.NewReplayer(filePath)
 		if err != nil {
 			return nil, nil, err
+		}
+		// The recorded fixtures predate the client-event-ID stamp appendEvent now writes into every
+		// AppendEventRequest's metadata (see clientEventIDMetadataKey), so strip it before matching rather than
+		// re-recording — recording requires the adk-go-e2e project. The stamp's own round-trip behavior is
+		// covered by the bufconn tests in vertexai_test.go.
+		rep.BeforeFunc = func(_ string, req proto.Message) error {
+			appendReq, ok := req.(*aiplatformpb.AppendEventRequest)
+			if !ok {
+				return nil
+			}
+			customMetadata := appendReq.GetEvent().GetEventMetadata().GetCustomMetadata()
+			if customMetadata == nil {
+				return nil
+			}
+			delete(customMetadata.Fields, clientEventIDMetadataKey)
+			if len(customMetadata.Fields) == 0 {
+				appendReq.Event.EventMetadata.CustomMetadata = nil
+			}
+			return nil
 		}
 		grpcOpts = rep.DialOptions()
 		teardown = rep.Close

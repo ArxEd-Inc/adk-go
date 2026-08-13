@@ -804,6 +804,119 @@ func TestVertexAiClientEventActionsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestVertexAiClientEventIDRoundTrip(t *testing.T) {
+	// AppendEvent returns no server-assigned ID and reads report server-assigned IDs, so appendEvent stamps the
+	// client-minted ID into the serialized metadata and listSessionEvents restores it — one event must present
+	// one ID across the round trip, on both the legacy-wire path and the raw_event path, without the stamp
+	// leaking into the restored CustomMetadata.
+	tests := []struct {
+		name               string
+		mutate             func(event *session.Event)
+		wantCustomMetadata map[string]any
+	}{
+		{
+			name:   "legacy wire, no custom metadata",
+			mutate: func(event *session.Event) {},
+		},
+		{
+			name: "legacy wire, existing custom metadata preserved",
+			mutate: func(event *session.Event) {
+				event.CustomMetadata = map[string]any{"k": "v"}
+			},
+			wantCustomMetadata: map[string]any{"k": "v"},
+		},
+		{
+			name: "raw_event wire",
+			mutate: func(event *session.Event) {
+				event.IsolationScope = "scope-1"
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			service := &fakeVertexAiSessionService{}
+			client := newFakeVertexAiClient(t, service)
+
+			event := session.NewEvent(ctx, "invocation-1")
+			event.Author = "agent"
+			event.LLMResponse = model.LLMResponse{Content: genai.NewContentFromText("hello", genai.RoleModel)}
+			tc.mutate(event)
+			clientEventID := event.ID
+			if clientEventID == "" {
+				t.Fatal("session.NewEvent minted no ID")
+			}
+
+			if err := client.appendEvent(ctx, "test-app", "session-1", event); err != nil {
+				t.Fatalf("appendEvent() failed: %v", err)
+			}
+			// The stamp must ride only the serialized form, never the caller's event.
+			if _, stamped := event.CustomMetadata["adkEventId"]; stamped {
+				t.Error("appendEvent() stamped the caller's in-memory CustomMetadata")
+			}
+
+			got, err := client.listSessionEvents(ctx, "test-app", "session-1", time.Time{}, 0)
+			if err != nil {
+				t.Fatalf("listSessionEvents() failed: %v", err)
+			}
+			if gotLen := len(got); gotLen != 1 {
+				t.Fatalf("len(got) = %d, want 1", gotLen)
+			}
+			if got[0].ID != clientEventID {
+				t.Errorf("round-tripped event ID = %q, want the client-minted %q", got[0].ID, clientEventID)
+			}
+			if diff := cmp.Diff(tc.wantCustomMetadata, got[0].CustomMetadata); diff != "" {
+				t.Errorf("CustomMetadata mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestVertexAiClientEventIDUnstampedFallsBackToServerID(t *testing.T) {
+	// Events written before stamping existed (or by other writers) carry no stamp and must keep presenting the
+	// server-assigned ID, on both wire shapes — including a raw_event blob whose own id field must NOT be
+	// consulted (pre-stamp events have always presented server IDs, and switching them retroactively would churn
+	// existing transcripts).
+	ctx := t.Context()
+	service := &fakeVertexAiSessionService{}
+	client := newFakeVertexAiClient(t, service)
+
+	legacyEvent := session.NewEvent(ctx, "invocation-1")
+	legacyEvent.Author = "agent"
+	legacyEvent.LLMResponse = model.LLMResponse{Content: genai.NewContentFromText("hello", genai.RoleModel)}
+	rawEvent := session.NewEvent(ctx, "invocation-1")
+	rawEvent.Author = "agent"
+	rawEvent.IsolationScope = "scope-1"
+	if err := client.appendEvent(ctx, "test-app", "session-1", legacyEvent); err != nil {
+		t.Fatalf("appendEvent() failed: %v", err)
+	}
+	if err := client.appendEvent(ctx, "test-app", "session-1", rawEvent); err != nil {
+		t.Fatalf("appendEvent() failed: %v", err)
+	}
+	// Simulate pre-stamp writes by removing the stamp the append just made.
+	for _, stored := range service.events {
+		delete(stored.EventMetadata.CustomMetadata.Fields, "adkEventId")
+	}
+
+	got, err := client.listSessionEvents(ctx, "test-app", "session-1", time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("listSessionEvents() failed: %v", err)
+	}
+	if gotLen := len(got); gotLen != 2 {
+		t.Fatalf("len(got) = %d, want 2", gotLen)
+	}
+	for i, gotEvent := range got {
+		wantServerID, err := sessionIdBySessionName(service.events[i].Name)
+		if err != nil {
+			t.Fatalf("sessionIdBySessionName() failed: %v", err)
+		}
+		if gotEvent.ID != wantServerID {
+			t.Errorf("unstamped event %d ID = %q, want the server-assigned %q", i, gotEvent.ID, wantServerID)
+		}
+	}
+}
+
 type fakeVertexAiSessionService struct {
 	aiplatformpb.UnimplementedSessionServiceServer
 	events []*aiplatformpb.SessionEvent
