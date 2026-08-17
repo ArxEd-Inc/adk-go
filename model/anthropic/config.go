@@ -53,11 +53,16 @@ const (
 	ThinkingModeBudget
 )
 
+// CacheTTL1h selects Anthropic's 1-hour cache TTL for a breakpoint. It is
+// exposed as a package constant so callers configure TTLs without importing
+// the Anthropic SDK directly.
+const CacheTTL1h = anthropicsdk.CacheControlEphemeralTTLTTL1h
+
 // CacheBreakpoint configures a single cache control breakpoint.
 type CacheBreakpoint struct {
 	// TTL controls the cache time-to-live for this breakpoint.
 	// Leave empty for the server default (5 minutes), or set to
-	// anthropicsdk.CacheControlEphemeralTTLTTL1h for 1-hour caching.
+	// CacheTTL1h for 1-hour caching.
 	//
 	// Cost: 5m writes cost 1.25x base input; 1h writes cost 2x base input.
 	// All cache reads cost 0.1x base input regardless of TTL.
@@ -70,9 +75,12 @@ type CacheBreakpoint struct {
 //
 // Anthropic evaluates cache prefixes in order: tools → system → messages.
 // When mixing TTLs, longer TTLs must appear before shorter ones in this order.
-// Anthropic allows at most 4 cache_control markers per request. Auto counts
-// toward that maximum — it results in a marker on the request's last cacheable
-// block — so configuring every breakpoint at once exceeds the limit.
+// Anthropic allows at most 4 cache_control markers per request; this struct
+// offers more breakpoints than that, so set at most four. Auto counts toward
+// that maximum — it results in a marker on the request's last cacheable block.
+// Two breakpoints landing on the same block (e.g. the named static-prefix tool
+// that is also the last tool) collapse into a single wire marker, so collapse
+// only ever shrinks the count.
 //
 // See: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
 type PromptCachingConfig struct {
@@ -87,6 +95,26 @@ type PromptCachingConfig struct {
 	// Tools places a breakpoint on the last tool definition, caching the full
 	// tool list.
 	Tools *CacheBreakpoint
+
+	// ConversationHistoryPrevTurn places a breakpoint on the last cacheable
+	// content block at or before the second-most-recent user message — in the
+	// agentic request shape (request N+1 = request N's messages + one
+	// assistant message + one user tool-results message), exactly where
+	// request N's prompt ended. Anthropic's cache lookup scans only ~20
+	// content blocks behind each marker, so when a turn appends more than
+	// that (wide parallel tool fan-out), ConversationHistory alone cannot see
+	// the previous request's entry and the whole history rewrites; this
+	// marker sits at that entry's endpoint, guaranteeing the chain. The
+	// invariant is that the anchor always carries a cache entry written by
+	// one of the last two requests: when the previous request ended in a
+	// synthetic continuation Content that was never persisted to the session
+	// (history ended on a model turn), the anchor lands where that request's
+	// own PrevTurn marker sat rather than at its end — still an exact hit,
+	// with just that one turn's delta re-written. No marker is placed when
+	// the request has fewer than two user messages. Sits earlier in the
+	// request than ConversationHistory, so its TTL must be >= that
+	// breakpoint's, and it consumes one of the four allowed markers.
+	ConversationHistoryPrevTurn *CacheBreakpoint
 
 	// ConversationHistory places a breakpoint on the newest cacheable content
 	// block, searching messages from last to first (thinking blocks cannot

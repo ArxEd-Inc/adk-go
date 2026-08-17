@@ -27,10 +27,10 @@ import anthropicsdk "github.com/anthropics/anthropic-sdk-go"
 //
 // The conversation-history breakpoint targets the newest message so that large
 // fresh content (e.g. a big tool result) is written to the cache on the call
-// where it first appears (1.25x base input price for a 5m write) instead of
-// being billed at full input price once and only cached on the following call.
-// The write premium is wasted only when the conversation ends at that message,
-// which agentic loops rarely do.
+// where it first appears (a cache write costs 1.25x base input at the default
+// 5m TTL, 2x at 1h) instead of being billed at full input price once and only
+// cached on the following call. The write premium is wasted only when the
+// conversation ends at that message, which agentic loops rarely do.
 func applyCacheBreakpoints(params *anthropicsdk.MessageNewParams, cfg *PromptCachingConfig) {
 	// 1. Tools — end of the static prefix, on the named tool definition
 	if cfg.ToolsStaticPrefixEnd != nil && cfg.ToolsStaticPrefixEndToolName != "" {
@@ -57,7 +57,21 @@ func applyCacheBreakpoints(params *anthropicsdk.MessageNewParams, cfg *PromptCac
 		params.System[len(params.System)-1].CacheControl = newCacheControl(cfg.SystemInstruction)
 	}
 
-	// 4. Conversation history — the newest cacheable content block, searching
+	// 4. Conversation history — the previous turn's endpoint: the last
+	// cacheable block at or before the second-most-recent user message,
+	// falling back message-by-message toward the front when that message has
+	// no cacheable block. Placed before ConversationHistory so that if both
+	// ever land on the same block, the later assignment wins — a single
+	// marker on the wire, same semantics as the tools pair above.
+	if cfg.ConversationHistoryPrevTurn != nil {
+		for i := secondNewestUserMessageIndex(params.Messages); i >= 0; i-- {
+			if setLastCacheableBlock(params.Messages[i].Content, cfg.ConversationHistoryPrevTurn) {
+				break
+			}
+		}
+	}
+
+	// 5. Conversation history — the newest cacheable content block, searching
 	// messages from last to first
 	if cfg.ConversationHistory != nil {
 		for i := len(params.Messages) - 1; i >= 0; i-- {
@@ -67,11 +81,26 @@ func applyCacheBreakpoints(params *anthropicsdk.MessageNewParams, cfg *PromptCac
 		}
 	}
 
-	// 5. Auto — top-level cache_control (applies a marker to the last
+	// 6. Auto — top-level cache_control (applies a marker to the last
 	// cacheable block in the request)
 	if cfg.Auto != nil {
 		params.CacheControl = newCacheControl(cfg.Auto)
 	}
+}
+
+// secondNewestUserMessageIndex returns the index of the second-most-recent
+// user-role message, or -1 when messages holds fewer than two.
+func secondNewestUserMessageIndex(messages []anthropicsdk.MessageParam) int {
+	users := 0
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == anthropicsdk.MessageParamRoleUser {
+			users++
+			if users == 2 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // setLastCacheableBlock places bp on the last content block that can carry

@@ -16,6 +16,7 @@ package anthropic
 
 import (
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -25,6 +26,24 @@ import (
 
 func toolParam(name string) anthropicsdk.ToolUnionParam {
 	return anthropicsdk.ToolUnionParam{OfTool: &anthropicsdk.ToolParam{Name: name}}
+}
+
+// toolUseBlocks returns n tool_use blocks, mimicking a parallel fan-out turn.
+func toolUseBlocks(n int) []anthropicsdk.ContentBlockParamUnion {
+	blocks := make([]anthropicsdk.ContentBlockParamUnion, n)
+	for i := range blocks {
+		blocks[i] = anthropicsdk.NewToolUseBlock(fmt.Sprintf("use-%d", i), map[string]any{}, "someTool")
+	}
+	return blocks
+}
+
+// toolResultBlocks returns n tool_result blocks matching toolUseBlocks(n).
+func toolResultBlocks(n int) []anthropicsdk.ContentBlockParamUnion {
+	blocks := make([]anthropicsdk.ContentBlockParamUnion, n)
+	for i := range blocks {
+		blocks[i] = anthropicsdk.NewToolResultBlock(fmt.Sprintf("use-%d", i), "result", false)
+	}
+	return blocks
 }
 
 // markerCount returns the number of cache_control markers in v's marshaled
@@ -165,6 +184,99 @@ func TestApplyCacheBreakpoints(t *testing.T) {
 			},
 		},
 		{
+			name: "prev-turn marker lands on the second-most-recent user message's last block",
+			cfg:  &PromptCachingConfig{ConversationHistoryPrevTurn: &CacheBreakpoint{}},
+			params: anthropicsdk.MessageNewParams{
+				Messages: []anthropicsdk.MessageParam{
+					anthropicsdk.NewUserMessage(
+						anthropicsdk.NewTextBlock("question"),
+						anthropicsdk.NewTextBlock("attachment"),
+					),
+					anthropicsdk.NewAssistantMessage(toolUseBlocks(1)...),
+					anthropicsdk.NewUserMessage(toolResultBlocks(1)...),
+				},
+			},
+			wantMessages: [][2]int{{0, 1}},
+		},
+		{
+			name: "prev-turn marker survives a wide parallel fan-out turn",
+			cfg:  &PromptCachingConfig{ConversationHistoryPrevTurn: &CacheBreakpoint{}},
+			params: anthropicsdk.MessageNewParams{
+				Messages: []anthropicsdk.MessageParam{
+					anthropicsdk.NewUserMessage(anthropicsdk.NewTextBlock("go")),
+					anthropicsdk.NewAssistantMessage(toolUseBlocks(12)...),
+					anthropicsdk.NewUserMessage(toolResultBlocks(12)...),
+				},
+			},
+			wantMessages: [][2]int{{0, 0}},
+		},
+		{
+			name: "prev-turn marker skipped on a single-message request",
+			cfg:  &PromptCachingConfig{ConversationHistoryPrevTurn: &CacheBreakpoint{}},
+			params: anthropicsdk.MessageNewParams{
+				Messages: []anthropicsdk.MessageParam{
+					anthropicsdk.NewUserMessage(anthropicsdk.NewTextBlock("hi")),
+				},
+			},
+		},
+		{
+			name: "prev-turn marker skipped with only one user message",
+			cfg:  &PromptCachingConfig{ConversationHistoryPrevTurn: &CacheBreakpoint{}},
+			params: anthropicsdk.MessageNewParams{
+				Messages: []anthropicsdk.MessageParam{
+					anthropicsdk.NewUserMessage(anthropicsdk.NewTextBlock("hi")),
+					anthropicsdk.NewAssistantMessage(anthropicsdk.NewTextBlock("answer")),
+				},
+			},
+		},
+		{
+			name: "prev-turn marker anchors past an assistant-text-only turn",
+			cfg:  &PromptCachingConfig{ConversationHistoryPrevTurn: &CacheBreakpoint{}},
+			params: anthropicsdk.MessageNewParams{
+				Messages: []anthropicsdk.MessageParam{
+					anthropicsdk.NewUserMessage(anthropicsdk.NewTextBlock("question")),
+					anthropicsdk.NewAssistantMessage(anthropicsdk.NewTextBlock("interim answer")),
+					anthropicsdk.NewUserMessage(anthropicsdk.NewTextBlock("follow-up")),
+				},
+			},
+			wantMessages: [][2]int{{0, 0}},
+		},
+		{
+			// A user message with no cacheable block cannot occur in
+			// production (thinking blocks only appear on assistant turns) but
+			// pins the fallback walk, same as the "no block is cacheable"
+			// case above.
+			name: "prev-turn marker falls back past an uncacheable anchor message",
+			cfg:  &PromptCachingConfig{ConversationHistoryPrevTurn: &CacheBreakpoint{}},
+			params: anthropicsdk.MessageNewParams{
+				Messages: []anthropicsdk.MessageParam{
+					anthropicsdk.NewUserMessage(anthropicsdk.NewTextBlock("question")),
+					anthropicsdk.NewAssistantMessage(anthropicsdk.NewTextBlock("answer")),
+					anthropicsdk.NewUserMessage(anthropicsdk.NewThinkingBlock("sig", "hmm")),
+					anthropicsdk.NewAssistantMessage(anthropicsdk.NewTextBlock("more")),
+					anthropicsdk.NewUserMessage(anthropicsdk.NewTextBlock("follow-up")),
+				},
+			},
+			wantMessages: [][2]int{{1, 0}},
+		},
+		{
+			// ConversationHistory falls back onto the sole user message while
+			// PrevTurn places nothing: the two history markers cannot stack
+			// on one block even under fallback.
+			name: "history and prev-turn markers cannot stack even under fallback",
+			cfg: &PromptCachingConfig{
+				ConversationHistoryPrevTurn: &CacheBreakpoint{},
+				ConversationHistory:         &CacheBreakpoint{},
+			},
+			params: anthropicsdk.MessageNewParams{
+				Messages: []anthropicsdk.MessageParam{
+					anthropicsdk.NewUserMessage(anthropicsdk.NewTextBlock("hi")),
+					anthropicsdk.NewAssistantMessage(anthropicsdk.NewThinkingBlock("sig", "hmm")),
+				},
+			},
+			wantMessages: [][2]int{{0, 0}},
+		},
+		{
 			name: "no configured breakpoints places no markers",
 			cfg:  &PromptCachingConfig{},
 			params: anthropicsdk.MessageNewParams{
@@ -186,19 +298,25 @@ func TestApplyCacheBreakpoints(t *testing.T) {
 			wantTopLevel: true,
 		},
 		{
-			name: "full agent-shaped config places exactly four markers",
+			// A config spending the full marker budget: both tools
+			// breakpoints plus both history breakpoints. With tool
+			// definitions appended after the named static-prefix tool, all
+			// four markers are distinct — exactly Anthropic's maximum,
+			// leaving no room for a SystemInstruction or Auto breakpoint
+			// alongside.
+			name: "four-breakpoint config with appended tools places exactly four markers",
 			cfg: &PromptCachingConfig{
-				SystemInstruction:            &CacheBreakpoint{},
 				Tools:                        &CacheBreakpoint{},
+				ConversationHistoryPrevTurn:  &CacheBreakpoint{},
 				ConversationHistory:          &CacheBreakpoint{},
 				ToolsStaticPrefixEnd:         &CacheBreakpoint{},
-				ToolsStaticPrefixEndToolName: "loadToolGroups",
+				ToolsStaticPrefixEndToolName: "loader",
 			},
 			params: anthropicsdk.MessageNewParams{
 				Tools: []anthropicsdk.ToolUnionParam{
 					toolParam("staticAlpha"),
 					toolParam("staticBeta"),
-					toolParam("loadToolGroups"),
+					toolParam("loader"),
 					toolParam("groupGamma"),
 					toolParam("groupDelta"),
 				},
@@ -213,8 +331,39 @@ func TestApplyCacheBreakpoints(t *testing.T) {
 				},
 			},
 			wantTools:    []int{2, 4},
-			wantSystem:   []int{1},
-			wantMessages: [][2]int{{2, 0}},
+			wantMessages: [][2]int{{0, 0}, {2, 0}},
+		},
+		{
+			// The same config when the named static-prefix tool is still the
+			// last tool: the two tools breakpoints collapse into one marker
+			// and only three reach the wire. Collapse only ever shrinks the
+			// count, so a four-breakpoint config never exceeds the budget in
+			// either state.
+			name: "four-breakpoint config with the prefix tool last collapses to three markers",
+			cfg: &PromptCachingConfig{
+				Tools:                        &CacheBreakpoint{},
+				ConversationHistoryPrevTurn:  &CacheBreakpoint{},
+				ConversationHistory:          &CacheBreakpoint{},
+				ToolsStaticPrefixEnd:         &CacheBreakpoint{},
+				ToolsStaticPrefixEndToolName: "loader",
+			},
+			params: anthropicsdk.MessageNewParams{
+				Tools: []anthropicsdk.ToolUnionParam{
+					toolParam("staticAlpha"),
+					toolParam("loader"),
+				},
+				System: []anthropicsdk.TextBlockParam{{Text: "instruction"}, {Text: "catalog"}},
+				Messages: []anthropicsdk.MessageParam{
+					anthropicsdk.NewUserMessage(anthropicsdk.NewTextBlock("hi")),
+					anthropicsdk.NewAssistantMessage(
+						anthropicsdk.NewThinkingBlock("sig", "hmm"),
+						anthropicsdk.NewTextBlock("calling a tool"),
+					),
+					anthropicsdk.NewUserMessage(anthropicsdk.NewToolResultBlock("use-1", "result", false)),
+				},
+			},
+			wantTools:    []int{1},
+			wantMessages: [][2]int{{0, 0}, {2, 0}},
 		},
 	}
 
@@ -270,12 +419,12 @@ func TestApplyCacheBreakpoints(t *testing.T) {
 // own TTL.
 func TestApplyCacheBreakpointsBothToolBreakpoints(t *testing.T) {
 	params := anthropicsdk.MessageNewParams{
-		Tools: []anthropicsdk.ToolUnionParam{toolParam("loadToolGroups"), toolParam("groupGamma")},
+		Tools: []anthropicsdk.ToolUnionParam{toolParam("loader"), toolParam("groupGamma")},
 	}
 	applyCacheBreakpoints(&params, &PromptCachingConfig{
 		Tools:                        &CacheBreakpoint{},
 		ToolsStaticPrefixEnd:         &CacheBreakpoint{TTL: anthropicsdk.CacheControlEphemeralTTLTTL1h},
-		ToolsStaticPrefixEndToolName: "loadToolGroups",
+		ToolsStaticPrefixEndToolName: "loader",
 	})
 	if got := markerCount(t, params.Tools); got != 2 {
 		t.Errorf("tool marker count = %d, want 2", got)
@@ -293,17 +442,43 @@ func TestApplyCacheBreakpointsBothToolBreakpoints(t *testing.T) {
 // single marker carrying the Tools breakpoint's TTL.
 func TestApplyCacheBreakpointsStaticPrefixEndCoincidesWithLastTool(t *testing.T) {
 	params := anthropicsdk.MessageNewParams{
-		Tools: []anthropicsdk.ToolUnionParam{toolParam("alpha"), toolParam("loadToolGroups")},
+		Tools: []anthropicsdk.ToolUnionParam{toolParam("alpha"), toolParam("loader")},
 	}
 	applyCacheBreakpoints(&params, &PromptCachingConfig{
 		Tools:                        &CacheBreakpoint{},
 		ToolsStaticPrefixEnd:         &CacheBreakpoint{TTL: anthropicsdk.CacheControlEphemeralTTLTTL1h},
-		ToolsStaticPrefixEndToolName: "loadToolGroups",
+		ToolsStaticPrefixEndToolName: "loader",
 	})
 	if got := markerCount(t, params.Tools); got != 1 {
 		t.Errorf("tool marker count = %d, want 1", got)
 	}
 	if ttl := params.Tools[1].OfTool.CacheControl.TTL; ttl != "" {
 		t.Errorf("surviving TTL = %q, want the Tools breakpoint's default", ttl)
+	}
+}
+
+// TestApplyCacheBreakpointsPrevTurnTTL: the PrevTurn breakpoint's TTL reaches
+// the wire on its anchor block.
+func TestApplyCacheBreakpointsPrevTurnTTL(t *testing.T) {
+	params := anthropicsdk.MessageNewParams{
+		Messages: []anthropicsdk.MessageParam{
+			anthropicsdk.NewUserMessage(anthropicsdk.NewTextBlock("question")),
+			anthropicsdk.NewAssistantMessage(anthropicsdk.NewTextBlock("calling a tool")),
+			anthropicsdk.NewUserMessage(anthropicsdk.NewToolResultBlock("use-1", "result", false)),
+		},
+	}
+	applyCacheBreakpoints(&params, &PromptCachingConfig{
+		ConversationHistoryPrevTurn: &CacheBreakpoint{TTL: CacheTTL1h},
+	})
+	ccPtr := params.Messages[0].Content[0].GetCacheControl()
+	if ccPtr == nil || ccPtr.TTL != CacheTTL1h {
+		t.Fatalf("prev-turn anchor cache control = %+v, want TTL 1h", ccPtr)
+	}
+	b, err := json.Marshal(params.Messages)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"ttl":"1h"`) {
+		t.Errorf(`marshaled messages missing "ttl":"1h": %s`, b)
 	}
 }
