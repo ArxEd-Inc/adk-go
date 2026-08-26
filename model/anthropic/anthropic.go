@@ -199,11 +199,22 @@ func (m *anthropicModel) generate(ctx context.Context, req *model.LLMRequest) (*
 	// extraction) would otherwise fail. Streaming has no such limit and yields the same final message.
 	stream := m.client.Messages.NewStreaming(ctx, params)
 	message := anthropicsdk.Message{}
+	messageStartCallback, _ := MessageStartCallbackFromContext(ctx)
 	for stream.Next() {
 		event := stream.Current()
 		repairAccumulatedToolInput(&message, event)
 		if err := message.Accumulate(event); err != nil {
 			return nil, fmt.Errorf("failed to accumulate message: %w", err)
+		}
+		switch ev := event.AsAny().(type) {
+		case anthropicsdk.MessageStartEvent:
+			if messageStartCallback != nil {
+				messageStartCallback(MessageStartUsage{
+					InputTokens:              ev.Message.Usage.InputTokens,
+					CacheReadInputTokens:     ev.Message.Usage.CacheReadInputTokens,
+					CacheCreationInputTokens: ev.Message.Usage.CacheCreationInputTokens,
+				})
+			}
 		}
 	}
 	if err := stream.Err(); err != nil {
@@ -232,6 +243,7 @@ func (m *anthropicModel) generateStream(ctx context.Context, req *model.LLMReque
 
 		stream := m.client.Messages.NewStreaming(ctx, params)
 		message := anthropicsdk.Message{}
+		messageStartCallback, _ := MessageStartCallbackFromContext(ctx)
 
 		for stream.Next() {
 			event := stream.Current()
@@ -245,6 +257,14 @@ func (m *anthropicModel) generateStream(ctx context.Context, req *model.LLMReque
 
 			// Handle different event types for streaming
 			switch ev := event.AsAny().(type) {
+			case anthropicsdk.MessageStartEvent:
+				if messageStartCallback != nil {
+					messageStartCallback(MessageStartUsage{
+						InputTokens:              ev.Message.Usage.InputTokens,
+						CacheReadInputTokens:     ev.Message.Usage.CacheReadInputTokens,
+						CacheCreationInputTokens: ev.Message.Usage.CacheCreationInputTokens,
+					})
+				}
 			case anthropicsdk.ContentBlockDeltaEvent:
 				// Handle text deltas
 				switch delta := ev.Delta.AsAny().(type) {
