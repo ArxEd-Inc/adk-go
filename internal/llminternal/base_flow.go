@@ -123,27 +123,47 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 	return func(yield func(*session.Event, error) bool) {
 		thoughtOnlyTurns := 0
 		for {
-			var lastEvent *session.Event
+			// Everything the decisions below need from the step's last event is
+			// read before that event is yielded, never after. Once yielded, the
+			// event belongs to the consumer: when the agent runs as a workflow
+			// node the consumer is another goroutine, and the runner writes to
+			// every event it receives (it stamps the compaction record back on
+			// after the on-event plugins), so a read here after the hand-off is
+			// a data race. A step that ends on a partial event is where it
+			// showed: a partial is the one event nothing else reads before this
+			// loop reaches it.
+			var (
+				lastEventSeen        bool
+				lastEventFinal       bool
+				lastEventThoughtOnly bool
+				lastEventPartial     bool
+				lastEventAuthor      string
+			)
 			for ev, err := range f.runOneStep(ctx) {
 				if err != nil {
 					yield(nil, err)
 					return
 				}
-				// forward the event first.
+				lastEventSeen = ev != nil
+				if ev != nil {
+					lastEventFinal = ev.IsFinalResponse()
+					lastEventThoughtOnly = isThoughtOnlyTurn(ev)
+					lastEventPartial = ev.LLMResponse.Partial
+					lastEventAuthor = ev.Author
+				}
 				if !yield(ev, nil) {
 					return
 				}
-				lastEvent = ev
 			}
-			if lastEvent == nil {
+			if !lastEventSeen {
 				return
 			}
-			if lastEvent.IsFinalResponse() {
+			if lastEventFinal {
 				// A thought-only ("thinking") turn reports as final but has no
 				// answer; don't stop on it — call the model again. Give up once
 				// the model has produced only thoughts too many times in a row,
 				// leaving the last thinking event as the result.
-				if !isThoughtOnlyTurn(lastEvent) {
+				if !lastEventThoughtOnly {
 					return
 				}
 				thoughtOnlyTurns++
@@ -155,14 +175,14 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 			} else {
 				thoughtOnlyTurns = 0
 			}
-			if lastEvent.LLMResponse.Partial {
+			if lastEventPartial {
 				// The last event is a partial streaming response. The realistic cause
 				// is a producer that ends a stream without a terminal aggregate (e.g.,
 				// an a2a peer whose stream ends on an appended artifact chunk with no
 				// terminal status). The turn was truncated, not completed, which is
 				// not expected, so we log a warning and return instead of looping again.
 				log.Printf("adk: agent %q (invocation %q): step ended on a partial event from %q; the producer did not close its stream with an aggregated final event, so the turn will not appear in session history",
-					ctx.Agent().Name(), ctx.InvocationID(), lastEvent.Author)
+					ctx.Agent().Name(), ctx.InvocationID(), lastEventAuthor)
 				return
 			}
 		}
