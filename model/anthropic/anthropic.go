@@ -300,7 +300,7 @@ func (m *anthropicModel) generateStream(ctx context.Context, req *model.LLMReque
 
 // convertRequest converts an LLMRequest to Anthropic MessageNewParams.
 func (m *anthropicModel) convertRequest(req *model.LLMRequest) (anthropicsdk.MessageNewParams, map[string]string, error) {
-	messages, err := converters.ContentsToMessages(req.Contents)
+	messages, markedBlockOrdinals, err := converters.ContentsToMessagesWithMarkedBlocks(req.Contents)
 	if err != nil {
 		return anthropicsdk.MessageNewParams{}, nil, fmt.Errorf("failed to convert contents: %w", err)
 	}
@@ -406,7 +406,7 @@ func (m *anthropicModel) convertRequest(req *model.LLMRequest) (anthropicsdk.Mes
 	}
 
 	if m.promptCaching != nil {
-		applyCacheBreakpoints(&params, m.promptCaching)
+		applyCacheBreakpoints(&params, m.promptCaching, markedBlockOrdinals)
 	}
 
 	return params, toolKeyAliases, nil

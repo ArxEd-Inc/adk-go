@@ -46,6 +46,12 @@ func toolResultBlocks(n int) []anthropicsdk.ContentBlockParamUnion {
 	return blocks
 }
 
+// documentBlock returns a base64 PDF document block, the wire form of a seeded
+// PDF part.
+func documentBlock() anthropicsdk.ContentBlockParamUnion {
+	return anthropicsdk.NewDocumentBlock(anthropicsdk.Base64PDFSourceParam{Data: "JVBERi0xLjQ="})
+}
+
 // markerCount returns the number of cache_control markers in v's marshaled
 // JSON form — the ground truth for what actually reaches the wire.
 func markerCount(t *testing.T, v any) int {
@@ -65,6 +71,10 @@ func TestApplyCacheBreakpoints(t *testing.T) {
 		name   string
 		cfg    *PromptCachingConfig
 		params anthropicsdk.MessageNewParams
+
+		// markedBlockOrdinals are the flat ordinals of the request's marked
+		// blocks, as the converter would report them for params.Messages.
+		markedBlockOrdinals []int
 
 		// Expected marker positions: indexes into Tools/System, and
 		// {message, block} index pairs into Messages.
@@ -365,11 +375,163 @@ func TestApplyCacheBreakpoints(t *testing.T) {
 			wantTools:    []int{1},
 			wantMessages: [][2]int{{0, 0}, {2, 0}},
 		},
+		{
+			name: "marked-part marker lands on the marked block of a single-user-message request",
+			cfg:  &PromptCachingConfig{MarkedPart: &CacheBreakpoint{}},
+			params: anthropicsdk.MessageNewParams{
+				Messages: []anthropicsdk.MessageParam{
+					anthropicsdk.NewUserMessage(
+						anthropicsdk.NewTextBlock("Field guide, pages 12-14:"),
+						documentBlock(),
+						anthropicsdk.NewTextBlock("Specimen notes for plot 7."),
+						anthropicsdk.NewTextBlock("Which species is this?"),
+					),
+				},
+			},
+			markedBlockOrdinals: []int{1},
+			wantMessages:        [][2]int{{0, 1}},
+		},
+		{
+			name: "marked-part marker uses the last marked block",
+			cfg:  &PromptCachingConfig{MarkedPart: &CacheBreakpoint{}},
+			params: anthropicsdk.MessageNewParams{
+				Messages: []anthropicsdk.MessageParam{
+					anthropicsdk.NewUserMessage(
+						anthropicsdk.NewTextBlock("Field guide, pages 12-14:"),
+						documentBlock(),
+						anthropicsdk.NewTextBlock("Field guide, pages 30-31:"),
+						documentBlock(),
+						anthropicsdk.NewTextBlock("Which species is this?"),
+					),
+				},
+			},
+			markedBlockOrdinals: []int{1, 3},
+			wantMessages:        [][2]int{{0, 3}},
+		},
+		{
+			// From the second request on, the prev-turn and history markers
+			// cover the marked block through the conversation's own entries.
+			name: "marked-part marker skipped once the request has two user messages",
+			cfg:  &PromptCachingConfig{MarkedPart: &CacheBreakpoint{}},
+			params: anthropicsdk.MessageNewParams{
+				Messages: []anthropicsdk.MessageParam{
+					anthropicsdk.NewUserMessage(
+						anthropicsdk.NewTextBlock("Field guide, pages 12-14:"),
+						documentBlock(),
+						anthropicsdk.NewTextBlock("Which species is this?"),
+					),
+					anthropicsdk.NewAssistantMessage(toolUseBlocks(1)...),
+					anthropicsdk.NewUserMessage(toolResultBlocks(1)...),
+				},
+			},
+			markedBlockOrdinals: []int{1},
+		},
+		{
+			name: "marked-part marker skipped when no block is marked",
+			cfg:  &PromptCachingConfig{MarkedPart: &CacheBreakpoint{}},
+			params: anthropicsdk.MessageNewParams{
+				Messages: []anthropicsdk.MessageParam{
+					anthropicsdk.NewUserMessage(anthropicsdk.NewTextBlock("Which species is this?"), documentBlock()),
+				},
+			},
+		},
+		{
+			name: "marked-part marker skipped when the ordinal is outside the request",
+			cfg:  &PromptCachingConfig{MarkedPart: &CacheBreakpoint{}},
+			params: anthropicsdk.MessageNewParams{
+				Messages: []anthropicsdk.MessageParam{
+					anthropicsdk.NewUserMessage(anthropicsdk.NewTextBlock("Which species is this?"), documentBlock()),
+				},
+			},
+			markedBlockOrdinals: []int{2},
+		},
+		{
+			// A seed that ends on the marked document with nothing after it:
+			// the history marker lands on the same block and the two collapse.
+			name: "marked-part and history markers collapse on a marked newest block",
+			cfg: &PromptCachingConfig{
+				MarkedPart:          &CacheBreakpoint{},
+				ConversationHistory: &CacheBreakpoint{},
+			},
+			params: anthropicsdk.MessageNewParams{
+				Messages: []anthropicsdk.MessageParam{
+					anthropicsdk.NewUserMessage(anthropicsdk.NewTextBlock("Field guide, pages 12-14:"), documentBlock()),
+				},
+			},
+			markedBlockOrdinals: []int{1},
+			wantMessages:        [][2]int{{0, 1}},
+		},
+		{
+			// The fan-out layout on a sibling's first request: static-prefix
+			// tool, system, the marked seed block and the newest block are
+			// four distinct markers — exactly the budget — with PrevTurn
+			// placing nothing on a single-user-message request.
+			name: "fan-out layout places exactly four markers on a first request",
+			cfg: &PromptCachingConfig{
+				ToolsStaticPrefixEnd:         &CacheBreakpoint{TTL: CacheTTL1h},
+				ToolsStaticPrefixEndToolName: "loader",
+				SystemInstruction:            &CacheBreakpoint{TTL: CacheTTL1h},
+				ConversationHistoryPrevTurn:  &CacheBreakpoint{},
+				MarkedPart:                   &CacheBreakpoint{},
+				ConversationHistory:          &CacheBreakpoint{},
+			},
+			params: anthropicsdk.MessageNewParams{
+				Tools:  []anthropicsdk.ToolUnionParam{toolParam("staticAlpha"), toolParam("loader")},
+				System: []anthropicsdk.TextBlockParam{{Text: "instruction"}, {Text: "catalog"}},
+				Messages: []anthropicsdk.MessageParam{
+					anthropicsdk.NewUserMessage(
+						anthropicsdk.NewTextBlock("Field guide, pages 12-14:"),
+						documentBlock(),
+						anthropicsdk.NewTextBlock("Specimen notes for plot 7."),
+						anthropicsdk.NewTextBlock("Which species is this?"),
+					),
+				},
+			},
+			markedBlockOrdinals: []int{1},
+			wantTools:           []int{1},
+			wantSystem:          []int{1},
+			wantMessages:        [][2]int{{0, 1}, {0, 3}},
+		},
+		{
+			// The same layout on the sibling's second request: PrevTurn now
+			// takes the slot at the end of the first message, the marked
+			// block gets nothing, and the count stays at four.
+			name: "fan-out layout places exactly four markers on a second request",
+			cfg: &PromptCachingConfig{
+				ToolsStaticPrefixEnd:         &CacheBreakpoint{TTL: CacheTTL1h},
+				ToolsStaticPrefixEndToolName: "loader",
+				SystemInstruction:            &CacheBreakpoint{TTL: CacheTTL1h},
+				ConversationHistoryPrevTurn:  &CacheBreakpoint{},
+				MarkedPart:                   &CacheBreakpoint{},
+				ConversationHistory:          &CacheBreakpoint{},
+			},
+			params: anthropicsdk.MessageNewParams{
+				Tools:  []anthropicsdk.ToolUnionParam{toolParam("staticAlpha"), toolParam("loader")},
+				System: []anthropicsdk.TextBlockParam{{Text: "instruction"}, {Text: "catalog"}},
+				Messages: []anthropicsdk.MessageParam{
+					anthropicsdk.NewUserMessage(
+						anthropicsdk.NewTextBlock("Field guide, pages 12-14:"),
+						documentBlock(),
+						anthropicsdk.NewTextBlock("Specimen notes for plot 7."),
+						anthropicsdk.NewTextBlock("Which species is this?"),
+					),
+					anthropicsdk.NewAssistantMessage(
+						anthropicsdk.NewThinkingBlock("sig", "hmm"),
+						toolUseBlocks(1)[0],
+					),
+					anthropicsdk.NewUserMessage(toolResultBlocks(1)...),
+				},
+			},
+			markedBlockOrdinals: []int{1},
+			wantTools:           []int{1},
+			wantSystem:          []int{1},
+			wantMessages:        [][2]int{{0, 3}, {2, 0}},
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			applyCacheBreakpoints(&tc.params, tc.cfg)
+			applyCacheBreakpoints(&tc.params, tc.cfg, tc.markedBlockOrdinals)
 
 			for i := range tc.params.Tools {
 				want := slices.Contains(tc.wantTools, i)
@@ -425,7 +587,7 @@ func TestApplyCacheBreakpointsBothToolBreakpoints(t *testing.T) {
 		Tools:                        &CacheBreakpoint{},
 		ToolsStaticPrefixEnd:         &CacheBreakpoint{TTL: anthropicsdk.CacheControlEphemeralTTLTTL1h},
 		ToolsStaticPrefixEndToolName: "loader",
-	})
+	}, nil)
 	if got := markerCount(t, params.Tools); got != 2 {
 		t.Errorf("tool marker count = %d, want 2", got)
 	}
@@ -448,7 +610,7 @@ func TestApplyCacheBreakpointsStaticPrefixEndCoincidesWithLastTool(t *testing.T)
 		Tools:                        &CacheBreakpoint{},
 		ToolsStaticPrefixEnd:         &CacheBreakpoint{TTL: anthropicsdk.CacheControlEphemeralTTLTTL1h},
 		ToolsStaticPrefixEndToolName: "loader",
-	})
+	}, nil)
 	if got := markerCount(t, params.Tools); got != 1 {
 		t.Errorf("tool marker count = %d, want 1", got)
 	}
@@ -469,7 +631,7 @@ func TestApplyCacheBreakpointsPrevTurnTTL(t *testing.T) {
 	}
 	applyCacheBreakpoints(&params, &PromptCachingConfig{
 		ConversationHistoryPrevTurn: &CacheBreakpoint{TTL: CacheTTL1h},
-	})
+	}, nil)
 	ccPtr := params.Messages[0].Content[0].GetCacheControl()
 	if ccPtr == nil || ccPtr.TTL != CacheTTL1h {
 		t.Fatalf("prev-turn anchor cache control = %+v, want TTL 1h", ccPtr)
@@ -480,5 +642,35 @@ func TestApplyCacheBreakpointsPrevTurnTTL(t *testing.T) {
 	}
 	if !strings.Contains(string(b), `"ttl":"1h"`) {
 		t.Errorf(`marshaled messages missing "ttl":"1h": %s`, b)
+	}
+}
+
+// TestApplyCacheBreakpointsMarkedPartTTL: the MarkedPart breakpoint's TTL
+// reaches the wire on the marked block — a document block, the shape a seeded
+// PDF takes.
+func TestApplyCacheBreakpointsMarkedPartTTL(t *testing.T) {
+	params := anthropicsdk.MessageNewParams{
+		Messages: []anthropicsdk.MessageParam{
+			anthropicsdk.NewUserMessage(
+				anthropicsdk.NewTextBlock("Field guide, pages 12-14:"),
+				documentBlock(),
+				anthropicsdk.NewTextBlock("Which species is this?"),
+			),
+		},
+	}
+	applyCacheBreakpoints(&params, &PromptCachingConfig{MarkedPart: &CacheBreakpoint{TTL: CacheTTL1h}}, []int{1})
+	ccPtr := params.Messages[0].Content[1].GetCacheControl()
+	if ccPtr == nil || ccPtr.TTL != CacheTTL1h {
+		t.Fatalf("marked document block cache control = %+v, want TTL 1h", ccPtr)
+	}
+	b, err := json.Marshal(params.Messages)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"ttl":"1h"`) {
+		t.Errorf(`marshaled messages missing "ttl":"1h": %s`, b)
+	}
+	if got := markerCount(t, params.Messages); got != 1 {
+		t.Errorf("marker count = %d, want 1", got)
 	}
 }

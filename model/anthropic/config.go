@@ -116,6 +116,24 @@ type PromptCachingConfig struct {
 	// breakpoint's, and it consumes one of the four allowed markers.
 	ConversationHistoryPrevTurn *CacheBreakpoint
 
+	// MarkedPart places a breakpoint on the content block converted from the
+	// last part marked with MarkCacheBreakpoint, and only when the request
+	// holds a single user message: a conversation's first request, where the
+	// caller has arranged that message as a prefix shared with sibling
+	// conversations (documents seeded to every worker of a fan-out, say)
+	// followed by per-conversation parts. The marker lets each sibling read
+	// the shared prefix from the one cache entry the first of them writes and
+	// write only its own remainder. It takes the marker slot
+	// ConversationHistoryPrevTurn leaves vacant on that first request (which
+	// has only one user message), and on every later request the history
+	// breakpoints already cover the block — the conversation's own earlier
+	// entries subsume it — so no marker is spent on it. Sits earlier in the
+	// request than ConversationHistory, so its TTL must be >= that
+	// breakpoint's. A request with no marked part places nothing; when the
+	// marked block is also the newest cacheable block, this breakpoint and
+	// ConversationHistory collapse into a single wire marker.
+	MarkedPart *CacheBreakpoint
+
 	// ConversationHistory places a breakpoint on the newest cacheable content
 	// block, searching messages from last to first (thinking blocks cannot
 	// carry cache_control), so each call writes the newest turn to the cache

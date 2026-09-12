@@ -17,10 +17,41 @@
 
 package anthropic
 
-import anthropicsdk "github.com/anthropics/anthropic-sdk-go"
+import (
+	anthropicsdk "github.com/anthropics/anthropic-sdk-go"
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/model/anthropic/internal/converters"
+)
+
+// MarkCacheBreakpoint marks the given part as a prompt-cache breakpoint
+// candidate for the PromptCachingConfig.MarkedPart breakpoint (see that field
+// for when a marker is placed on it). It sets
+// converters.PartCacheBreakpointMetadataKey in the part's PartMetadata,
+// allocating the map when nil; a nil part is left alone.
+func MarkCacheBreakpoint(part *genai.Part) {
+	if part == nil {
+		return
+	}
+	if part.PartMetadata == nil {
+		part.PartMetadata = map[string]any{}
+	}
+	part.PartMetadata[converters.PartCacheBreakpointMetadataKey] = true
+}
+
+// IsCacheBreakpointMarked reports whether the given part was marked with
+// MarkCacheBreakpoint; nil-safe. Exported so callers that key on the marker —
+// a gate serializing concurrent writes of the shared prefix, say — need not
+// know the metadata key.
+func IsCacheBreakpointMarked(part *genai.Part) bool {
+	return converters.IsCacheBreakpointMarked(part)
+}
 
 // applyCacheBreakpoints sets cache_control breakpoints on the request based
 // on the provided configuration. Each breakpoint is independently optional.
+// markedBlockOrdinals are the flat ordinals of the request's marked content
+// blocks, as converters.ContentsToMessagesWithMarkedBlocks reports them for
+// params.Messages; nil when no part is marked.
 //
 // Anthropic evaluates cache prefixes in order: tools → system → messages.
 // When mixing TTLs, longer TTLs must appear before shorter TTLs in this order.
@@ -31,7 +62,11 @@ import anthropicsdk "github.com/anthropics/anthropic-sdk-go"
 // 5m TTL, 2x at 1h) instead of being billed at full input price once and only
 // cached on the following call. The write premium is wasted only when the
 // conversation ends at that message, which agentic loops rarely do.
-func applyCacheBreakpoints(params *anthropicsdk.MessageNewParams, cfg *PromptCachingConfig) {
+func applyCacheBreakpoints(
+	params *anthropicsdk.MessageNewParams,
+	cfg *PromptCachingConfig,
+	markedBlockOrdinals []int,
+) {
 	// 1. Tools — end of the static prefix, on the named tool definition
 	if cfg.ToolsStaticPrefixEnd != nil && cfg.ToolsStaticPrefixEndToolName != "" {
 		for i := range params.Tools {
@@ -71,7 +106,23 @@ func applyCacheBreakpoints(params *anthropicsdk.MessageNewParams, cfg *PromptCac
 		}
 	}
 
-	// 5. Conversation history — the newest cacheable content block, searching
+	// 5. Marked part — the block converted from the last marked part, on a
+	// single-user-message request only: with two or more user messages the
+	// prev-turn marker above and the history marker below already cover the
+	// block, and a marker here would spend one of the four on an entry those
+	// subsume. Placed before ConversationHistory so that when the marked block
+	// is also the newest cacheable block the later assignment wins — a single
+	// marker on the wire, same semantics as the pairs above.
+	if cfg.MarkedPart != nil && len(markedBlockOrdinals) > 0 && secondNewestUserMessageIndex(params.Messages) < 0 {
+		lastMarkedOrdinal := markedBlockOrdinals[len(markedBlockOrdinals)-1]
+		if messageIndex, blockIndex, ok := blockPosition(params.Messages, lastMarkedOrdinal); ok {
+			if ccPtr := params.Messages[messageIndex].Content[blockIndex].GetCacheControl(); ccPtr != nil {
+				*ccPtr = newCacheControl(cfg.MarkedPart)
+			}
+		}
+	}
+
+	// 6. Conversation history — the newest cacheable content block, searching
 	// messages from last to first
 	if cfg.ConversationHistory != nil {
 		for i := len(params.Messages) - 1; i >= 0; i-- {
@@ -81,11 +132,29 @@ func applyCacheBreakpoints(params *anthropicsdk.MessageNewParams, cfg *PromptCac
 		}
 	}
 
-	// 6. Auto — top-level cache_control (applies a marker to the last
+	// 7. Auto — top-level cache_control (applies a marker to the last
 	// cacheable block in the request)
 	if cfg.Auto != nil {
 		params.CacheControl = newCacheControl(cfg.Auto)
 	}
+}
+
+// blockPosition resolves a flat block ordinal — an index into the
+// concatenation of every message's content blocks, as
+// converters.ContentsToMessagesWithMarkedBlocks reports them — to the message
+// and block indexes it names, reporting false for an ordinal outside the
+// request.
+func blockPosition(messages []anthropicsdk.MessageParam, ordinal int) (messageIndex, blockIndex int, ok bool) {
+	if ordinal < 0 {
+		return 0, 0, false
+	}
+	for i := range messages {
+		if ordinal < len(messages[i].Content) {
+			return i, ordinal, true
+		}
+		ordinal -= len(messages[i].Content)
+	}
+	return 0, 0, false
 }
 
 // secondNewestUserMessageIndex returns the index of the second-most-recent

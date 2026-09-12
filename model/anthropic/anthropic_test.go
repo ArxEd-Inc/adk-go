@@ -24,6 +24,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/model/anthropic/internal/converters"
 )
 
 func ptr[T any](v T) *T { return &v }
@@ -195,5 +196,64 @@ func TestGenerateContentWrapsConversionFailureWithErrRequestConversion(t *testin
 				t.Fatalf("GenerateContent error = %v, want an error wrapping ErrRequestConversion", gotErr)
 			}
 		})
+	}
+}
+
+// TestConvertRequestMarkedPartCarriesCacheControl: a part marked with
+// MarkCacheBreakpoint, converted under a MarkedPart layout, yields its wire
+// block — here a PDF's document block — carrying cache_control, and nothing
+// else in the single-user-message request does.
+func TestConvertRequestMarkedPartCarriesCacheControl(t *testing.T) {
+	m := &anthropicModel{
+		name:             "claude-opus-4-8",
+		defaultMaxTokens: 64000,
+		promptCaching:    &PromptCachingConfig{MarkedPart: &CacheBreakpoint{}},
+	}
+	seededDocument := &genai.Part{InlineData: &genai.Blob{MIMEType: "application/pdf", Data: []byte("%PDF-1.4")}}
+	MarkCacheBreakpoint(seededDocument)
+	params, _, err := m.convertRequest(&model.LLMRequest{
+		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{
+			{Text: "Field guide, pages 12-14:"},
+			seededDocument,
+			{Text: "Specimen notes for plot 7."},
+			{Text: "Which species is this?"},
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("convertRequest: %v", err)
+	}
+	if len(params.Messages) != 1 || len(params.Messages[0].Content) != 4 {
+		t.Fatalf("messages = %+v, want one user message of four blocks", params.Messages)
+	}
+	documentBlock := params.Messages[0].Content[1]
+	if documentBlock.OfDocument == nil {
+		t.Fatalf("block 1 = %+v, want the document block", documentBlock)
+	}
+	if documentBlock.OfDocument.CacheControl.Type == "" {
+		t.Error("marked document block carries no cache_control")
+	}
+	if got := markerCount(t, params); got != 1 {
+		t.Errorf("marshaled marker count = %d, want 1 (the marked block alone)", got)
+	}
+}
+
+// TestMarkCacheBreakpoint pins the marker helper: it allocates a nil metadata
+// map, preserves existing keys, and tolerates a nil part.
+func TestMarkCacheBreakpoint(t *testing.T) {
+	MarkCacheBreakpoint(nil)
+
+	bare := &genai.Part{Text: "x"}
+	if IsCacheBreakpointMarked(bare) {
+		t.Errorf("unmarked part reads as marked: %+v", bare.PartMetadata)
+	}
+	MarkCacheBreakpoint(bare)
+	if !converters.IsCacheBreakpointMarked(bare) || !IsCacheBreakpointMarked(bare) {
+		t.Errorf("part with no prior metadata not marked: %+v", bare.PartMetadata)
+	}
+
+	withMetadata := &genai.Part{Text: "y", PartMetadata: map[string]any{"other": "kept"}}
+	MarkCacheBreakpoint(withMetadata)
+	if !converters.IsCacheBreakpointMarked(withMetadata) || withMetadata.PartMetadata["other"] != "kept" {
+		t.Errorf("part with prior metadata = %+v, want marked with the other key kept", withMetadata.PartMetadata)
 	}
 }

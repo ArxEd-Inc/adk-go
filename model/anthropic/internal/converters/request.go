@@ -30,11 +30,44 @@ import (
 	"google.golang.org/genai"
 )
 
+// PartCacheBreakpointMetadataKey is the genai.Part.PartMetadata key that marks a
+// part as a prompt-cache breakpoint candidate: a true value under it asks the
+// model to place a cache_control marker on the content block the part converts
+// to (see the PromptCachingConfig.MarkedPart breakpoint). Callers set it with
+// MarkCacheBreakpoint rather than by hand. The metadata rides only on the
+// in-memory part — it is not part of the wire request, and session backends
+// need not persist it.
+const PartCacheBreakpointMetadataKey = "anthropic.cacheBreakpoint"
+
+// IsCacheBreakpointMarked reports whether the given part carries a true
+// PartCacheBreakpointMetadataKey; nil-safe.
+func IsCacheBreakpointMarked(part *genai.Part) bool {
+	if part == nil || part.PartMetadata == nil {
+		return false
+	}
+	marked, ok := part.PartMetadata[PartCacheBreakpointMetadataKey].(bool)
+	return ok && marked
+}
+
 // ContentsToMessages converts genai Contents to Anthropic MessageParams.
 // It handles role mapping and content part conversion.
 func ContentsToMessages(contents []*genai.Content) ([]anthropic.MessageParam, error) {
+	messages, _, err := ContentsToMessagesWithMarkedBlocks(contents)
+	return messages, err
+}
+
+// ContentsToMessagesWithMarkedBlocks is ContentsToMessages that also reports,
+// in ascending order, the flat block ordinals of the parts marked with
+// PartCacheBreakpointMetadataKey — each ordinal indexing the concatenation of
+// every returned message's content blocks. Ordinals rather than
+// (message, block) pairs because the merge of same-role messages below moves
+// blocks between messages; the conversion is order-preserving and drops
+// nothing but parts that yield no block, and a merge only concatenates, so a
+// block's flat ordinal is fixed once its part is converted. The ordinals are
+// nil when no part is marked.
+func ContentsToMessagesWithMarkedBlocks(contents []*genai.Content) ([]anthropic.MessageParam, []int, error) {
 	if len(contents) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// One sanitizer per request so a tool_use ID and its later tool_result ID
@@ -42,30 +75,41 @@ func ContentsToMessages(contents []*genai.Content) ([]anthropic.MessageParam, er
 	sanitizer := newToolUseIDSanitizer()
 
 	var messages []anthropic.MessageParam
+	var markedBlockOrdinals []int
+	var blockCount int
 	for _, content := range contents {
 		if content == nil {
 			continue
 		}
 
-		msg, err := contentToMessage(content, sanitizer)
+		msg, markedBlockIndexes, err := contentToMessage(content, sanitizer)
 		if err != nil {
-			return nil, fmt.Errorf("failed to convert content: %w", err)
+			return nil, nil, fmt.Errorf("failed to convert content: %w", err)
 		}
 		if msg != nil {
 			messages = append(messages, *msg)
+			for _, blockIndex := range markedBlockIndexes {
+				markedBlockOrdinals = append(markedBlockOrdinals, blockCount+blockIndex)
+			}
+			blockCount += len(msg.Content)
 		}
 	}
 
 	// Merge consecutive messages with the same role (Anthropic requires alternating roles)
 	messages = mergeConsecutiveMessages(messages)
 
-	return messages, nil
+	return messages, markedBlockOrdinals, nil
 }
 
-// contentToMessage converts a single genai.Content to an Anthropic MessageParam.
-func contentToMessage(content *genai.Content, sanitizer *toolUseIDSanitizer) (*anthropic.MessageParam, error) {
+// contentToMessage converts a single genai.Content to an Anthropic MessageParam,
+// also returning the indexes into the message's content blocks of the parts
+// marked with PartCacheBreakpointMetadataKey (nil when none is marked).
+func contentToMessage(
+	content *genai.Content,
+	sanitizer *toolUseIDSanitizer,
+) (*anthropic.MessageParam, []int, error) {
 	if content == nil || len(content.Parts) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// Check if this content contains tool results (FunctionResponse).
@@ -95,33 +139,37 @@ func contentToMessage(content *genai.Content, sanitizer *toolUseIDSanitizer) (*a
 		var err error
 		role, err = mapRole(content.Role)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	var blocks []anthropic.ContentBlockParamUnion
+	var markedBlockIndexes []int
 	for _, part := range content.Parts {
 		if part == nil {
 			continue
 		}
 		block, err := partToContentBlock(part, sanitizer)
 		if err != nil {
-			return nil, fmt.Errorf("failed to convert part: %w", err)
+			return nil, nil, fmt.Errorf("failed to convert part: %w", err)
 		}
 		if block != nil {
+			if IsCacheBreakpointMarked(part) {
+				markedBlockIndexes = append(markedBlockIndexes, len(blocks))
+			}
 			blocks = append(blocks, *block)
 		}
 	}
 
 	if len(blocks) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	msg := anthropic.MessageParam{
 		Role:    role,
 		Content: blocks,
 	}
-	return &msg, nil
+	return &msg, markedBlockIndexes, nil
 }
 
 // mapRole maps genai role to Anthropic MessageParamRole.
