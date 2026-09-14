@@ -157,21 +157,33 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 				userContent = nodeInputToContent(nodeInput)
 			}
 			sess := ctx.Session()
-			if seed := PrepareLLMAgentInput(a, ctx, nodeInput); seed != nil {
-				// A tool or callback context reports no session, and wrapping a
-				// nil one panics further down in telemetry. That panic predates
-				// this change; the set of callers that reach it does not. An
-				// undeclared sub-agent adopted by a chat coordinator used to be
-				// stamped chat, and chat ignores nodeInput and never seeds — it
-				// now resolves single_turn at a node and arrives here. Measured:
-				// the same call completes on the merge base. Same treatment as
-				// the chat branch, then: say what is missing rather than crash
-				// several frames later.
-				if sess == nil {
-					yield(nil, fmt.Errorf("RunLLMAgentAsNode: LlmAgent %q needs a session to seed its input, which a tool or callback context does not provide", a.Name()))
-					return
+			// The contents processor builds a scoped agent's first turn itself:
+			// when the invocation carries an isolation scope, it prepends the
+			// node input from UserContent (with the single-turn nudge) to the
+			// request. Seeding the same input into the session view as well
+			// delivered it twice, as two consecutive user contents; a provider
+			// that merges same-role messages then sends one message carrying
+			// every input block twice, which for a document-heavy input doubles
+			// the first request and leaves no shared prefix for a cache marker
+			// placed on the input. The seed stays the delivery for the unscoped
+			// run, where the processor prepends nothing.
+			if ctx.IsolationScope() == "" {
+				if seed := PrepareLLMAgentInput(a, ctx, nodeInput); seed != nil {
+					// A tool or callback context reports no session, and wrapping a
+					// nil one panics further down in telemetry. That panic predates
+					// this change; the set of callers that reach it does not. An
+					// undeclared sub-agent adopted by a chat coordinator used to be
+					// stamped chat, and chat ignores nodeInput and never seeds — it
+					// now resolves single_turn at a node and arrives here. Measured:
+					// the same call completes on the merge base. Same treatment as
+					// the chat branch, then: say what is missing rather than crash
+					// several frames later.
+					if sess == nil {
+						yield(nil, fmt.Errorf("RunLLMAgentAsNode: LlmAgent %q needs a session to seed its input, which a tool or callback context does not provide", a.Name()))
+						return
+					}
+					sess = newWrappedSession(sess, seed)
 				}
-				sess = newWrappedSession(sess, seed)
 			}
 			ic := icontext.NewInvocationContext(bound, icontext.InvocationContextParams{
 				Artifacts:      ctx.Artifacts(),

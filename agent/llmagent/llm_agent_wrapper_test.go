@@ -1504,3 +1504,114 @@ func TestLlmAgent_New_DoesNotMutateASubAgentsMode(t *testing.T) {
 		t.Errorf("the undeclared sub-agent's mode after building a coordinator = %q, want unset", got)
 	}
 }
+
+// TestRunLLMAgentAsNode_SingleTurn_NodeInputReachesTheModelOnce pins how a
+// single_turn node's input reaches its first model request. A scoped run
+// (a workflow node with an isolation scope) gets it from the contents
+// processor, which prepends UserContent with the single-turn nudge; an
+// unscoped run gets it from the seeded session view. Either way the input
+// appears exactly once: before the scoped run stopped seeding, it arrived
+// as two consecutive user contents, so a provider that merges same-role
+// messages saw every input block twice.
+func TestRunLLMAgentAsNode_SingleTurn_NodeInputReachesTheModelOnce(t *testing.T) {
+	t.Parallel()
+
+	const inputHeader = "Quarterly figures for the report"
+	nodeInput := &genai.Content{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{
+			{Text: inputHeader},
+			{InlineData: &genai.Blob{MIMEType: "application/pdf", Data: []byte("%PDF-1.4 figures")}},
+			{Text: "Summarize the attached figures in two sentences."},
+		},
+	}
+
+	for _, tc := range []struct {
+		name           string
+		isolationScope string
+		wantNudge      bool
+	}{
+		{name: "scoped node run", isolationScope: "wf:report-1", wantNudge: true},
+		{name: "unscoped node run", isolationScope: "", wantNudge: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var captured []*genai.Content
+			capture := func(_ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+				if captured == nil {
+					captured = append([]*genai.Content(nil), req.Contents...)
+				}
+				return nil, nil
+			}
+			a, err := llmagent.New(llmagent.Config{
+				Name:                 "summarizer",
+				Description:          "Summarizes figures.",
+				Model:                &scriptedLLM{},
+				Mode:                 llmagent.ModeSingleTurn,
+				BeforeModelCallbacks: []llmagent.BeforeModelCallback{capture},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+
+			svc := session.InMemoryService()
+			createResp, err := svc.Create(t.Context(), &session.CreateRequest{
+				AppName: "app", UserID: "u", SessionID: "s-" + tc.name,
+			})
+			if err != nil {
+				t.Fatalf("session.Create: %v", err)
+			}
+			ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				Agent:          a,
+				Session:        createResp.Session,
+				IsolationScope: tc.isolationScope,
+				InvocationID:   "inv-test",
+			})
+			for _, err := range llmagent.RunLLMAgentAsNode(a, agent.NewContext(ic), nodeInput) {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if captured == nil {
+				t.Fatal("the model was never called")
+			}
+			var userContents []*genai.Content
+			var headerOccurrences int
+			for _, c := range captured {
+				if c.Role == genai.RoleUser {
+					userContents = append(userContents, c)
+				}
+				for _, p := range c.Parts {
+					if p != nil && p.Text == inputHeader {
+						headerOccurrences++
+					}
+				}
+			}
+			if headerOccurrences != 1 {
+				t.Errorf("the node input appears %d times in the first request, want exactly once; contents: %v", headerOccurrences, captured)
+			}
+			if len(userContents) != 1 {
+				t.Fatalf("user contents in the first request = %d, want 1; contents: %v", len(userContents), captured)
+			}
+			wantParts := len(nodeInput.Parts)
+			if tc.wantNudge {
+				wantParts++
+			}
+			got := userContents[0].Parts
+			if len(got) != wantParts {
+				t.Fatalf("user content parts = %d, want %d (the input%s); parts: %v", len(got), wantParts,
+					map[bool]string{true: " plus the single-turn nudge", false: ""}[tc.wantNudge], got)
+			}
+			for i, want := range nodeInput.Parts {
+				if diff := cmp.Diff(want, got[i]); diff != "" {
+					t.Errorf("part %d mismatch (-want +got):\n%s", i, diff)
+				}
+			}
+			if tc.wantNudge && got[len(got)-1].Text != llminternal.SingleTurnNudge {
+				t.Errorf("last part = %q, want the single-turn nudge", got[len(got)-1].Text)
+			}
+		})
+	}
+}
