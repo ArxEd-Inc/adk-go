@@ -67,23 +67,33 @@ func applyCacheBreakpoints(
 	cfg *PromptCachingConfig,
 	markedBlockOrdinals []int,
 ) {
-	// 1. Tools — end of the static prefix, on the named tool definition
+	// 1. Tools — end of the static prefix, on the named tool definition,
+	// unless that tool is deferred: Anthropic rejects cache_control on a
+	// deferred tool.
 	if cfg.ToolsStaticPrefixEnd != nil && cfg.ToolsStaticPrefixEndToolName != "" {
 		for i := range params.Tools {
 			if tool := params.Tools[i].OfTool; tool != nil && tool.Name == cfg.ToolsStaticPrefixEndToolName {
-				tool.CacheControl = newCacheControl(cfg.ToolsStaticPrefixEnd)
+				if !converters.IsDeferredTool(params.Tools[i]) {
+					tool.CacheControl = newCacheControl(cfg.ToolsStaticPrefixEnd)
+				}
 				break
 			}
 		}
 	}
 
-	// 2. Tools — last tool definition. When the last tool is also the named
-	// static-prefix tool, this assignment overwrites the one above, leaving a
-	// single marker on the wire.
-	if cfg.Tools != nil && len(params.Tools) > 0 {
-		last := &params.Tools[len(params.Tools)-1]
-		if last.OfTool != nil {
-			last.OfTool.CacheControl = newCacheControl(cfg.Tools)
+	// 2. Tools — the last tool definition that is not deferred, for the same
+	// reason; deferred definitions sit outside the tools prefix anyway. When
+	// that tool is also the named static-prefix tool, this assignment
+	// overwrites the one above, leaving a single marker on the wire.
+	if cfg.Tools != nil {
+		for i := len(params.Tools) - 1; i >= 0; i-- {
+			if converters.IsDeferredTool(params.Tools[i]) {
+				continue
+			}
+			if tool := params.Tools[i].OfTool; tool != nil {
+				tool.CacheControl = newCacheControl(cfg.Tools)
+			}
+			break
 		}
 	}
 

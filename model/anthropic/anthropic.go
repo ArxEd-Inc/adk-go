@@ -55,6 +55,8 @@ type anthropicModel struct {
 	effort           Effort
 	thinkingMode     ThinkingMode
 	promptCaching    *PromptCachingConfig
+
+	toolReferencesResponseKey string
 }
 
 // NewModel returns [model.LLM], backed by Anthropic Claude.
@@ -119,6 +121,8 @@ func NewModel(ctx context.Context, modelName anthropicsdk.Model, cfg *Config) (m
 		effort:           cfg.Effort,
 		thinkingMode:     cfg.ThinkingMode,
 		promptCaching:    cfg.PromptCaching,
+
+		toolReferencesResponseKey: cfg.ToolReferencesResponseKey,
 	}, nil
 }
 
@@ -300,19 +304,33 @@ func (m *anthropicModel) generateStream(ctx context.Context, req *model.LLMReque
 
 // convertRequest converts an LLMRequest to Anthropic MessageNewParams.
 func (m *anthropicModel) convertRequest(req *model.LLMRequest) (anthropicsdk.MessageNewParams, map[string]string, error) {
-	messages, markedBlockOrdinals, err := converters.ContentsToMessagesWithMarkedBlocks(req.Contents)
+	// Tools convert first: the contents' tool references may name only the tools this request defers.
+	// toolKeyAliases maps aliased top-level tool property keys back to their original names; it is
+	// returned so the response parser can restore them.
+	var tools []anthropicsdk.ToolUnionParam
+	var toolKeyAliases map[string]string
+	if req.Config != nil && len(req.Config.Tools) > 0 {
+		tools, toolKeyAliases = converters.ToolsToAnthropicTools(req.Config.Tools, func(name string) bool {
+			return IsToolLoadingDeferred(req, name)
+		})
+	}
+
+	messages, markedBlockOrdinals, err := converters.ContentsToMessagesWithMarkedBlocks(
+		req.Contents,
+		converters.ContentsOptions{
+			ToolReferencesResponseKey: m.toolReferencesResponseKey,
+			DeferredToolNames:         converters.DeferredToolNames(tools),
+		},
+	)
 	if err != nil {
 		return anthropicsdk.MessageNewParams{}, nil, fmt.Errorf("failed to convert contents: %w", err)
 	}
-
-	// toolKeyAliases maps aliased top-level tool property keys back to their original names; it is
-	// populated when tools are converted below and returned so the response parser can restore them.
-	var toolKeyAliases map[string]string
 
 	params := anthropicsdk.MessageNewParams{
 		Model:     m.name,
 		Messages:  messages,
 		MaxTokens: int64(m.defaultMaxTokens),
+		Tools:     tools,
 	}
 
 	if req.Config != nil {
@@ -329,11 +347,6 @@ func (m *anthropicModel) convertRequest(req *model.LLMRequest) (anthropicsdk.Mes
 		}
 		if req.Config.MaxOutputTokens > 0 {
 			params.MaxTokens = int64(req.Config.MaxOutputTokens)
-		}
-
-		// Tools
-		if len(req.Config.Tools) > 0 {
-			params.Tools, toolKeyAliases = converters.ToolsToAnthropicTools(req.Config.Tools)
 		}
 
 		// Tool choice from ToolConfig

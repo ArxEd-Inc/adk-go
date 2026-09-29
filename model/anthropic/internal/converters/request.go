@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -49,10 +50,25 @@ func IsCacheBreakpointMarked(part *genai.Part) bool {
 	return ok && marked
 }
 
+// ContentsOptions configures ContentsToMessagesWithMarkedBlocks. The zero value
+// converts every function response to a tool_result of its JSON.
+type ContentsOptions struct {
+	// ToolReferencesResponseKey names the function-response key whose value, a
+	// list of tool names, the converter sends as tool_reference blocks rather
+	// than as JSON (see functionResponseToBlocks). Empty disables references.
+	ToolReferencesResponseKey string
+
+	// DeferredToolNames are the tools this request sends with defer_loading,
+	// the only tools a tool_reference block may name: Anthropic rejects a
+	// reference to a tool the request does not define, and documents
+	// references only for deferred ones.
+	DeferredToolNames map[string]struct{}
+}
+
 // ContentsToMessages converts genai Contents to Anthropic MessageParams.
 // It handles role mapping and content part conversion.
 func ContentsToMessages(contents []*genai.Content) ([]anthropic.MessageParam, error) {
-	messages, _, err := ContentsToMessagesWithMarkedBlocks(contents)
+	messages, _, err := ContentsToMessagesWithMarkedBlocks(contents, ContentsOptions{})
 	return messages, err
 }
 
@@ -63,9 +79,13 @@ func ContentsToMessages(contents []*genai.Content) ([]anthropic.MessageParam, er
 // (message, block) pairs because the merge of same-role messages below moves
 // blocks between messages; the conversion is order-preserving and drops
 // nothing but parts that yield no block, and a merge only concatenates, so a
-// block's flat ordinal is fixed once its part is converted. The ordinals are
-// nil when no part is marked.
-func ContentsToMessagesWithMarkedBlocks(contents []*genai.Content) ([]anthropic.MessageParam, []int, error) {
+// block's flat ordinal is fixed once its part is converted, save for the
+// tool-results-first reordering, which remaps the ordinals it moves. The
+// ordinals are nil when no part is marked.
+func ContentsToMessagesWithMarkedBlocks(
+	contents []*genai.Content,
+	opts ContentsOptions,
+) ([]anthropic.MessageParam, []int, error) {
 	if len(contents) == 0 {
 		return nil, nil, nil
 	}
@@ -82,7 +102,7 @@ func ContentsToMessagesWithMarkedBlocks(contents []*genai.Content) ([]anthropic.
 			continue
 		}
 
-		msg, markedBlockIndexes, err := contentToMessage(content, sanitizer)
+		msg, markedBlockIndexes, err := contentToMessage(content, sanitizer, opts)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to convert content: %w", err)
 		}
@@ -97,16 +117,78 @@ func ContentsToMessagesWithMarkedBlocks(contents []*genai.Content) ([]anthropic.
 
 	// Merge consecutive messages with the same role (Anthropic requires alternating roles)
 	messages = mergeConsecutiveMessages(messages)
+	markedBlockOrdinals = moveToolResultsFirst(messages, markedBlockOrdinals)
 
 	return messages, markedBlockOrdinals, nil
 }
 
+// moveToolResultsFirst reorders each user message holding a tool_result block
+// so that every tool_result block precedes every other block, keeping the
+// relative order within both groups, and returns markedBlockOrdinals remapped
+// to the new positions, ascending. Anthropic rejects a user message with any
+// block before one of its tool results, and two sources produce that order: a
+// function response carrying tool references converts to a tool_result
+// followed by a text block, and the merge above concatenates one content's
+// blocks after the previous content's, so a text block can land before the next
+// content's tool results.
+func moveToolResultsFirst(messages []anthropic.MessageParam, markedBlockOrdinals []int) []int {
+	remapped := slices.Clone(markedBlockOrdinals)
+	offset := 0
+	for i := range messages {
+		content := messages[i].Content
+		if messages[i].Role == anthropic.MessageParamRoleUser && toolResultsNotFirst(content) {
+			order := make([]int, 0, len(content))
+			for index, block := range content {
+				if block.OfToolResult != nil {
+					order = append(order, index)
+				}
+			}
+			for index, block := range content {
+				if block.OfToolResult == nil {
+					order = append(order, index)
+				}
+			}
+			newPositions := make([]int, len(content))
+			reordered := make([]anthropic.ContentBlockParamUnion, len(content))
+			for newPosition, oldPosition := range order {
+				reordered[newPosition] = content[oldPosition]
+				newPositions[oldPosition] = newPosition
+			}
+			messages[i].Content = reordered
+			for j, ordinal := range remapped {
+				if ordinal >= offset && ordinal < offset+len(content) {
+					remapped[j] = offset + newPositions[ordinal-offset]
+				}
+			}
+		}
+		offset += len(content)
+	}
+	slices.Sort(remapped)
+	return remapped
+}
+
+// toolResultsNotFirst reports whether any tool_result block follows a block
+// that is not one.
+func toolResultsNotFirst(content []anthropic.ContentBlockParamUnion) bool {
+	sawOther := false
+	for _, block := range content {
+		if block.OfToolResult == nil {
+			sawOther = true
+		} else if sawOther {
+			return true
+		}
+	}
+	return false
+}
+
 // contentToMessage converts a single genai.Content to an Anthropic MessageParam,
 // also returning the indexes into the message's content blocks of the parts
-// marked with PartCacheBreakpointMetadataKey (nil when none is marked).
+// marked with PartCacheBreakpointMetadataKey (nil when none is marked). A marked
+// part that converts to more than one block marks the last of them.
 func contentToMessage(
 	content *genai.Content,
 	sanitizer *toolUseIDSanitizer,
+	opts ContentsOptions,
 ) (*anthropic.MessageParam, []int, error) {
 	if content == nil || len(content.Parts) == 0 {
 		return nil, nil, nil
@@ -149,15 +231,15 @@ func contentToMessage(
 		if part == nil {
 			continue
 		}
-		block, err := partToContentBlock(part, sanitizer)
+		partBlocks, err := partToContentBlocks(part, sanitizer, opts)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to convert part: %w", err)
 		}
-		if block != nil {
+		if len(partBlocks) > 0 {
+			blocks = append(blocks, partBlocks...)
 			if IsCacheBreakpointMarked(part) {
-				markedBlockIndexes = append(markedBlockIndexes, len(blocks))
+				markedBlockIndexes = append(markedBlockIndexes, len(blocks)-1)
 			}
-			blocks = append(blocks, *block)
 		}
 	}
 
@@ -184,8 +266,15 @@ func mapRole(role string) (anthropic.MessageParamRole, error) {
 	}
 }
 
-// partToContentBlock converts a genai Part to an Anthropic ContentBlockParamUnion.
-func partToContentBlock(part *genai.Part, sanitizer *toolUseIDSanitizer) (*anthropic.ContentBlockParamUnion, error) {
+// partToContentBlocks converts a genai Part to Anthropic content blocks: one
+// block for every kind of part, save for a function response carrying tool
+// references, which converts to two (see functionResponseToBlocks), and nil for
+// a part that yields none.
+func partToContentBlocks(
+	part *genai.Part,
+	sanitizer *toolUseIDSanitizer,
+	opts ContentsOptions,
+) ([]anthropic.ContentBlockParamUnion, error) {
 	if part == nil {
 		return nil, nil
 	}
@@ -196,8 +285,7 @@ func partToContentBlock(part *genai.Part, sanitizer *toolUseIDSanitizer) (*anthr
 	// block also has a non-empty ThoughtSignature.
 	if part.Thought {
 		if data, ok := decodeRedactedThinking(part.ThoughtSignature); ok {
-			block := anthropic.NewRedactedThinkingBlock(data)
-			return &block, nil
+			return []anthropic.ContentBlockParamUnion{anthropic.NewRedactedThinkingBlock(data)}, nil
 		}
 	}
 
@@ -208,13 +296,12 @@ func partToContentBlock(part *genai.Part, sanitizer *toolUseIDSanitizer) (*anthr
 	// otherwise drop empty-text thoughts and lose the signature, risking a 400
 	// on the following tool turn.
 	if part.Thought && len(part.ThoughtSignature) > 0 {
-		block := anthropic.ContentBlockParamUnion{
+		return []anthropic.ContentBlockParamUnion{{
 			OfThinking: &anthropic.ThinkingBlockParam{
 				Thinking:  part.Text,
 				Signature: base64.StdEncoding.EncodeToString(part.ThoughtSignature),
 			},
-		}
-		return &block, nil
+		}}, nil
 	}
 
 	// A thought part that is neither a signed thinking block nor recognized redacted thinking can't be
@@ -229,28 +316,27 @@ func partToContentBlock(part *genai.Part, sanitizer *toolUseIDSanitizer) (*anthr
 
 	// Text content
 	if part.Text != "" {
-		block := anthropic.NewTextBlock(part.Text)
-		return &block, nil
+		return []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(part.Text)}, nil
 	}
 
 	// Inline binary data (images, PDFs)
 	if part.InlineData != nil {
-		return inlineDataToBlock(part.InlineData)
+		return singleBlock(inlineDataToBlock(part.InlineData))
 	}
 
 	// File data (URI-based)
 	if part.FileData != nil {
-		return fileDataToBlock(part.FileData)
+		return singleBlock(fileDataToBlock(part.FileData))
 	}
 
 	// Function response (tool result)
 	if part.FunctionResponse != nil {
-		return functionResponseToBlock(part.FunctionResponse, sanitizer)
+		return functionResponseToBlocks(part.FunctionResponse, sanitizer, opts)
 	}
 
 	// Function call - these appear in model responses replayed as history
 	if part.FunctionCall != nil {
-		return functionCallToBlock(part.FunctionCall, sanitizer)
+		return singleBlock(functionCallToBlock(part.FunctionCall, sanitizer))
 	}
 
 	// Executable code and CodeExecutionResult are Gemini-specific features
@@ -260,6 +346,14 @@ func partToContentBlock(part *genai.Part, sanitizer *toolUseIDSanitizer) (*anthr
 	}
 
 	return nil, nil
+}
+
+// singleBlock adapts a single-block converter's result to partToContentBlocks'.
+func singleBlock(block *anthropic.ContentBlockParamUnion, err error) ([]anthropic.ContentBlockParamUnion, error) {
+	if err != nil || block == nil {
+		return nil, err
+	}
+	return []anthropic.ContentBlockParamUnion{*block}, nil
 }
 
 // inlineDataToBlock converts inline binary data to an Anthropic content block.
@@ -361,32 +455,119 @@ func fileDataToBlock(fileData *genai.FileData) (*anthropic.ContentBlockParamUnio
 	return nil, fmt.Errorf("unsupported MIME type for file data: %s", mimeType)
 }
 
-// functionResponseToBlock converts a FunctionResponse to an Anthropic tool result block.
-func functionResponseToBlock(resp *genai.FunctionResponse, sanitizer *toolUseIDSanitizer) (*anthropic.ContentBlockParamUnion, error) {
+// functionResponseToBlocks converts a FunctionResponse to Anthropic content
+// blocks. When opts names a references key and the response holds a list of
+// tool names under it, the names of tools the request defers become the
+// tool_result's only content, as tool_reference blocks, which Anthropic expands
+// in place into those tools' definitions so the model can call them; the rest
+// of the response follows as a text block labeled with the result's ID, since a
+// tool_result cannot mix tool_reference blocks with other content. A name the
+// request does not defer is dropped, and a response left with no reference
+// converts as one without the key would. Every other response converts to a
+// single tool_result of its JSON.
+func functionResponseToBlocks(
+	resp *genai.FunctionResponse,
+	sanitizer *toolUseIDSanitizer,
+	opts ContentsOptions,
+) ([]anthropic.ContentBlockParamUnion, error) {
 	if resp == nil {
 		return nil, nil
 	}
 
-	// Convert the response to JSON string. Keep `&`, `<`, and `>` literal:
-	// the JSON is read by a model rather than embedded in HTML, and the
-	// six-byte escape sequences json.Marshal applies to those characters by
-	// default inflate URL-heavy tool results.
-	var content string
-	if resp.Response != nil {
-		var jsonBuffer bytes.Buffer
-		encoder := json.NewEncoder(&jsonBuffer)
-		encoder.SetEscapeHTML(false)
-		if err := encoder.Encode(resp.Response); err != nil {
-			return nil, fmt.Errorf("failed to marshal function response: %w", err)
+	response := resp.Response
+	var references []string
+	if names, ok := toolReferenceNames(response, opts.ToolReferencesResponseKey); ok {
+		response = make(map[string]any, len(resp.Response)-1)
+		for key, value := range resp.Response {
+			if key != opts.ToolReferencesResponseKey {
+				response[key] = value
+			}
 		}
-		// Encode appends a trailing newline after the value.
-		content = strings.TrimSuffix(jsonBuffer.String(), "\n")
+		for _, name := range names {
+			if _, deferred := opts.DeferredToolNames[name]; deferred && !slices.Contains(references, name) {
+				references = append(references, name)
+			}
+		}
 	}
 
 	// Sanitize the tool-use ID to Anthropic's required shape, consistently with
 	// the matching tool_use block so the result still correlates.
-	block := anthropic.NewToolResultBlock(sanitizer.sanitize(resp.ID), content, false)
-	return &block, nil
+	toolUseID := sanitizer.sanitize(resp.ID)
+
+	if len(references) == 0 {
+		var content string
+		if response != nil {
+			var err error
+			if content, err = functionResponseJSON(response); err != nil {
+				return nil, err
+			}
+		}
+		return []anthropic.ContentBlockParamUnion{anthropic.NewToolResultBlock(toolUseID, content, false)}, nil
+	}
+
+	referenceBlocks := make([]anthropic.ToolResultBlockParamContentUnion, 0, len(references))
+	for _, name := range references {
+		referenceBlocks = append(referenceBlocks, anthropic.ToolResultBlockParamContentUnion{
+			OfToolReference: &anthropic.ToolReferenceBlockParam{ToolName: name},
+		})
+	}
+	blocks := []anthropic.ContentBlockParamUnion{{
+		OfToolResult: &anthropic.ToolResultBlockParam{
+			ToolUseID: toolUseID,
+			Content:   referenceBlocks,
+			IsError:   anthropic.Bool(false),
+		},
+	}}
+	if len(response) > 0 {
+		remainder, err := functionResponseJSON(response)
+		if err != nil {
+			return nil, err
+		}
+		blocks = append(blocks, anthropic.NewTextBlock(fmt.Sprintf("Tool result %s, continued:\n%s", toolUseID, remainder)))
+	}
+	return blocks, nil
+}
+
+// toolReferenceNames returns the tool names a function response lists under
+// key, reporting false when key is empty, absent from the response, or holds
+// anything but a list of strings — a []string as a tool returns it, or a []any
+// of strings as it reads back from a session store that round-trips the
+// response through JSON.
+func toolReferenceNames(response map[string]any, key string) ([]string, bool) {
+	if key == "" {
+		return nil, false
+	}
+	switch value := response[key].(type) {
+	case []string:
+		return value, true
+	case []any:
+		names := make([]string, 0, len(value))
+		for _, element := range value {
+			name, ok := element.(string)
+			if !ok {
+				return nil, false
+			}
+			names = append(names, name)
+		}
+		return names, true
+	default:
+		return nil, false
+	}
+}
+
+// functionResponseJSON encodes a function response as compact JSON. It keeps
+// `&`, `<`, and `>` literal: the JSON is read by a model rather than embedded
+// in HTML, and the six-byte escape sequences json.Marshal applies to those
+// characters by default inflate URL-heavy tool results.
+func functionResponseJSON(response map[string]any) (string, error) {
+	var jsonBuffer bytes.Buffer
+	encoder := json.NewEncoder(&jsonBuffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(response); err != nil {
+		return "", fmt.Errorf("failed to marshal function response: %w", err)
+	}
+	// Encode appends a trailing newline after the value.
+	return strings.TrimSuffix(jsonBuffer.String(), "\n"), nil
 }
 
 // functionCallToBlock converts a FunctionCall to an Anthropic tool use block.

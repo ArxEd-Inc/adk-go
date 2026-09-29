@@ -48,7 +48,7 @@ const (
 // redactedThinkingMarker prefixes an Anthropic redacted_thinking block's encrypted Data when it is carried back in a
 // genai.Part's ThoughtSignature. ThoughtSignature is the only opaque per-Part field that survives the Vertex AI
 // session backend (PartMetadata is dropped there), so it doubles as the carrier for redacted thinking; the marker lets
-// partToContentBlock distinguish a carried redacted block from a normal thinking signature. It is deliberately
+// partToContentBlocks distinguish a carried redacted block from a normal thinking signature. It is deliberately
 // distinctive so a real (base64-decoded) Anthropic signature cannot collide with it.
 var redactedThinkingMarker = []byte("\x00adk-anthropic-redacted-thinking\x00")
 
@@ -181,7 +181,7 @@ func ContentBlockToGenaiPart(block anthropic.ContentBlockUnion, toolKeyAliases m
 		// Preserve Data so the block can be replayed faithfully — Anthropic requires redacted-thinking blocks that
 		// precede a tool_use to be passed back unchanged. genai.Part has no field for redacted data, and the Vertex AI
 		// session backend persists only a fixed set of Part fields, so carry Data in ThoughtSignature behind
-		// redactedThinkingMarker; partToContentBlock recognizes it on replay. Text is kept only for human-readable
+		// redactedThinkingMarker; partToContentBlocks recognizes it on replay. Text is kept only for human-readable
 		// logs/UI and is ignored on replay.
 		return &genai.Part{
 			Text:             "[thinking redacted]",

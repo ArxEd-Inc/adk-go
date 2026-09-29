@@ -257,3 +257,120 @@ func TestMarkCacheBreakpoint(t *testing.T) {
 		t.Errorf("part with prior metadata = %+v, want marked with the other key kept", withMetadata.PartMetadata)
 	}
 }
+
+// deferringTool is a dispatch entry that reports deferral.
+type deferringTool struct{ deferred bool }
+
+func (t deferringTool) DeferLoading() bool { return t.deferred }
+
+// TestIsToolLoadingDeferred pins that only a dispatch entry implementing
+// DeferredLoadingTool and reporting true defers its tool.
+func TestIsToolLoadingDeferred(t *testing.T) {
+	req := &model.LLMRequest{Tools: map[string]any{
+		"lookupSpecies":   "a dispatch entry of another type",
+		"describeHabitat": deferringTool{deferred: true},
+		"countSpecimens":  deferringTool{deferred: false},
+	}}
+	cases := []struct {
+		req  *model.LLMRequest
+		name string
+		want bool
+	}{
+		{req: nil, name: "describeHabitat"},
+		{req: req, name: "absentTool"},
+		{req: req, name: "lookupSpecies"},
+		{req: req, name: "countSpecimens"},
+		{req: req, name: "describeHabitat", want: true},
+	}
+	for _, tc := range cases {
+		if got := IsToolLoadingDeferred(tc.req, tc.name); got != tc.want {
+			t.Errorf("IsToolLoadingDeferred(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestConvertRequestDeferredToolsAndReferences: a request whose dispatch
+// entries defer two of three tools, whose last tool result references one of
+// them, converts to deferred declarations, a reference-only tool_result
+// followed by the rest of the response as text, and markers only where
+// Anthropic accepts them: the loader (the static prefix end and the last
+// undeferred tool, collapsed), the system block and the newest block.
+func TestConvertRequestDeferredToolsAndReferences(t *testing.T) {
+	m := &anthropicModel{
+		name:             "claude-opus-4-8",
+		defaultMaxTokens: 64000,
+		promptCaching: &PromptCachingConfig{
+			ToolsStaticPrefixEnd:         &CacheBreakpoint{TTL: CacheTTL1h},
+			ToolsStaticPrefixEndToolName: "lookupSpecies",
+			Tools:                        &CacheBreakpoint{TTL: CacheTTL1h},
+			SystemInstruction:            &CacheBreakpoint{TTL: CacheTTL1h},
+			ConversationHistory:          &CacheBreakpoint{TTL: CacheTTL1h},
+		},
+		toolReferencesResponseKey: "toolReferences",
+	}
+	declaration := func(name string) *genai.FunctionDeclaration {
+		return &genai.FunctionDeclaration{
+			Name:        name,
+			Description: "Field guide tool " + name + ".",
+			ParametersJsonSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"plot": map[string]any{"type": "integer"}},
+			},
+		}
+	}
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			genai.NewContentFromText("Which species live on plot 7?", "user"),
+			{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+				ID: "call_1", Name: "lookupSpecies", Args: map[string]any{"plot": 7},
+			}}}},
+			{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+				ID: "call_1", Name: "lookupSpecies", Response: map[string]any{
+					"guide":          "Plot 7 is wetland; describeHabitat reads its survey.",
+					"toolReferences": []string{"describeHabitat"},
+				},
+			}}}},
+		},
+		Config: &genai.GenerateContentConfig{
+			SystemInstruction: genai.NewContentFromText("You catalogue field surveys.", "user"),
+			Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{
+				declaration("lookupSpecies"), declaration("describeHabitat"), declaration("countSpecimens"),
+			}}},
+		},
+		Tools: map[string]any{
+			"lookupSpecies":   deferringTool{deferred: false},
+			"describeHabitat": deferringTool{deferred: true},
+			"countSpecimens":  deferringTool{deferred: true},
+		},
+	}
+
+	params, _, err := m.convertRequest(req)
+	if err != nil {
+		t.Fatalf("convertRequest: %v", err)
+	}
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+	wire := string(data)
+	if got := strings.Count(wire, `"defer_loading":true`); got != 2 {
+		t.Errorf(`"defer_loading":true appears %d times, want 2: %s`, got, wire)
+	}
+	if !strings.Contains(wire, `{"tool_name":"describeHabitat","type":"tool_reference"}`) {
+		t.Errorf("request JSON lacks the describeHabitat tool_reference: %s", wire)
+	}
+	if !strings.Contains(wire, `Tool result call_1, continued:\n{\"guide\":`) {
+		t.Errorf("request JSON lacks the labeled continuation text: %s", wire)
+	}
+	if strings.Contains(wire, `"toolReferences"`) {
+		t.Errorf("request JSON still carries the references key: %s", wire)
+	}
+	for _, tool := range params.Tools[1:] {
+		if tool.OfTool.CacheControl.Type != "" {
+			t.Errorf("deferred tool %s carries cache_control", tool.OfTool.Name)
+		}
+	}
+	if got := markerCount(t, params); got != 3 {
+		t.Errorf("marshaled marker count = %d, want 3 (loader, system, newest block)", got)
+	}
+}

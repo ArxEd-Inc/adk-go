@@ -32,8 +32,13 @@ import (
 // ToolsToAnthropicTools converts genai Tools to Anthropic ToolUnionParams. It also returns a map
 // from each aliased top-level property key back to its original name (see aliasToolKey); the caller
 // must pass that map to MessageToLLMResponse so tool-call arguments are restored to their original
-// field names. The map is empty when no key needed aliasing.
-func ToolsToAnthropicTools(tools []*genai.Tool) ([]anthropic.ToolUnionParam, map[string]string) {
+// field names. The map is empty when no key needed aliasing. isDeferred, when non-nil, reports the
+// declarations to send with defer_loading: Anthropic keeps a deferred definition out of the prompt
+// until a tool_reference block names it, so it costs no context until then.
+func ToolsToAnthropicTools(
+	tools []*genai.Tool,
+	isDeferred func(name string) bool,
+) ([]anthropic.ToolUnionParam, map[string]string) {
 	if len(tools) == 0 {
 		return nil, nil
 	}
@@ -48,10 +53,34 @@ func ToolsToAnthropicTools(tools []*genai.Tool) ([]anthropic.ToolUnionParam, map
 			if fd == nil {
 				continue
 			}
-			result = append(result, FunctionDeclarationToTool(fd, aliases))
+			converted := FunctionDeclarationToTool(fd, aliases)
+			if isDeferred != nil && isDeferred(fd.Name) {
+				converted.OfTool.DeferLoading = anthropic.Bool(true)
+			}
+			result = append(result, converted)
 		}
 	}
 	return result, aliases
+}
+
+// DeferredToolNames returns the names of the tools sent with defer_loading, nil when there are none.
+func DeferredToolNames(tools []anthropic.ToolUnionParam) map[string]struct{} {
+	var names map[string]struct{}
+	for _, tool := range tools {
+		if IsDeferredTool(tool) {
+			if names == nil {
+				names = map[string]struct{}{}
+			}
+			names[tool.OfTool.Name] = struct{}{}
+		}
+	}
+	return names
+}
+
+// IsDeferredTool reports whether the tool is sent with defer_loading. Such a tool cannot carry
+// cache_control: Anthropic rejects the request.
+func IsDeferredTool(tool anthropic.ToolUnionParam) bool {
+	return tool.OfTool != nil && tool.OfTool.DeferLoading.Valid() && tool.OfTool.DeferLoading.Value
 }
 
 // FunctionDeclarationToTool converts a genai FunctionDeclaration to an Anthropic ToolUnionParam,

@@ -93,7 +93,9 @@ type PromptCachingConfig struct {
 	SystemInstruction *CacheBreakpoint
 
 	// Tools places a breakpoint on the last tool definition, caching the full
-	// tool list.
+	// tool list. Deferred tools (see DeferredLoadingTool) cannot carry a
+	// breakpoint and sit outside the tools prefix, so the breakpoint goes on
+	// the last tool that is not deferred.
 	Tools *CacheBreakpoint
 
 	// ConversationHistoryPrevTurn places a breakpoint on the last cacheable
@@ -148,7 +150,9 @@ type PromptCachingConfig struct {
 	// breakpoint is placed, and when the named tool is also the last tool the
 	// Tools breakpoint overwrites this one (a single marker on the wire). This
 	// is the earliest breakpoint in the request, so its TTL must be >= the
-	// TTLs of the breakpoints after it (see the ordering rule above).
+	// TTLs of the breakpoints after it (see the ordering rule above). A
+	// deferred tool (see DeferredLoadingTool) cannot carry a breakpoint, so
+	// none is placed when the named tool is deferred.
 	ToolsStaticPrefixEnd *CacheBreakpoint
 
 	// ToolsStaticPrefixEndToolName names the tool definition that
@@ -189,6 +193,19 @@ type Config struct {
 	// PromptCaching configures optional prompt caching breakpoints.
 	// When nil (the default), no cache control is applied.
 	PromptCaching *PromptCachingConfig
+
+	// ToolReferencesResponseKey names a function-response key under which a
+	// tool returns a list of tool names to make callable: each name of a tool
+	// the request defers (see DeferredLoadingTool) is sent as a tool_reference
+	// block, which Anthropic expands in place into the tool's definition, and
+	// the rest of the response follows as a text block labeled with the
+	// result's ID, because a tool_result cannot mix tool_reference blocks with
+	// other content. A name the request does not defer is dropped rather than
+	// sent, since Anthropic rejects a reference to a tool it does not define;
+	// a response left with no reference converts to the plain JSON of the
+	// response without the key. A reference stays expanded for as long as it
+	// stays in the conversation. Empty (the default) disables references.
+	ToolReferencesResponseKey string
 
 	// Effort sets output_config.effort on requests where thinking is enabled,
 	// pinning the reasoning depth for this model rather than deriving it from

@@ -30,7 +30,11 @@
 // classifiers or the model itself) is surfaced as an error response carrying its
 // stop_details rather than as a silent empty turn; and redacted thinking is round-tripped
 // faithfully (its data rides in the thought signature), while a thought that
-// cannot be replayed is an error rather than silently dropped. Both the Vertex AI
+// cannot be replayed is an error rather than silently dropped. Tools may be
+// declared with deferred loading (see [DeferredLoadingTool]), and a tool's result
+// may make deferred tools callable through tool_reference blocks (see
+// Config.ToolReferencesResponseKey), so a conversation can grow the set of tools
+// the model sees without changing the tools array. Both the Vertex AI
 // and direct Anthropic API backends are selectable via [Config] (Variant /
 // ANTHROPIC_USE_VERTEX); both paths are exercised.
 //

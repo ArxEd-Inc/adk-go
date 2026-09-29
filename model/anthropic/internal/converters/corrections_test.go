@@ -116,33 +116,33 @@ func TestToolUseIDSanitizer(t *testing.T) {
 	}
 }
 
-// TestPartToContentBlockEmptyTextThought verifies the empty-text thinking guard:
+// TestPartToContentBlocksEmptyTextThought verifies the empty-text thinking guard:
 // a thought block carried back with a signature but no text (display:"omitted")
 // must still be replayed as a thinking block, not dropped.
-func TestPartToContentBlockEmptyTextThought(t *testing.T) {
+func TestPartToContentBlocksEmptyTextThought(t *testing.T) {
 	sig := []byte("signature-bytes")
 	part := &genai.Part{Thought: true, ThoughtSignature: sig, Text: ""}
 
-	block, err := partToContentBlock(part, newToolUseIDSanitizer())
+	blocks, err := partToContentBlocks(part, newToolUseIDSanitizer(), ContentsOptions{})
 	if err != nil {
-		t.Fatalf("partToContentBlock: %v", err)
+		t.Fatalf("partToContentBlocks: %v", err)
 	}
-	if block == nil || block.OfThinking == nil {
+	if len(blocks) != 1 || blocks[0].OfThinking == nil {
 		t.Fatalf("empty-text thought dropped; want a thinking block")
 	}
-	if want := base64.StdEncoding.EncodeToString(sig); block.OfThinking.Signature != want {
-		t.Fatalf("signature = %q, want %q", block.OfThinking.Signature, want)
+	if want := base64.StdEncoding.EncodeToString(sig); blocks[0].OfThinking.Signature != want {
+		t.Fatalf("signature = %q, want %q", blocks[0].OfThinking.Signature, want)
 	}
 }
 
-// TestPartToContentBlockUnsignedThoughtErrors verifies that a thought part carrying neither a signature nor
+// TestPartToContentBlocksUnsignedThoughtErrors verifies that a thought part carrying neither a signature nor
 // redacted-thinking data cannot be faithfully replayed and is surfaced as an error rather than silently dropped.
 // MessageToLLMResponse never produces such a part (a thinking block always carries a signature, a redacted block the
 // redacted marker), so reaching here means corrupted or foreign history.
-func TestPartToContentBlockUnsignedThoughtErrors(t *testing.T) {
+func TestPartToContentBlocksUnsignedThoughtErrors(t *testing.T) {
 	part := &genai.Part{Thought: true, Text: "stray reasoning"}
 
-	if _, err := partToContentBlock(part, newToolUseIDSanitizer()); err == nil {
+	if _, err := partToContentBlocks(part, newToolUseIDSanitizer(), ContentsOptions{}); err == nil {
 		t.Fatalf("unsigned, unmarked thought did not error; want an error")
 	}
 }

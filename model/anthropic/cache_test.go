@@ -674,3 +674,68 @@ func TestApplyCacheBreakpointsMarkedPartTTL(t *testing.T) {
 		t.Errorf("marker count = %d, want 1", got)
 	}
 }
+
+// deferredToolParam returns a tool sent with defer_loading.
+func deferredToolParam(name string) anthropicsdk.ToolUnionParam {
+	tool := toolParam(name)
+	tool.OfTool.DeferLoading = anthropicsdk.Bool(true)
+	return tool
+}
+
+// TestApplyCacheBreakpointsSkipDeferredTools: Anthropic rejects cache_control
+// on a deferred tool, so the Tools breakpoint lands on the last tool that is
+// not deferred and the static-prefix breakpoint is dropped when its named tool
+// is deferred.
+func TestApplyCacheBreakpointsSkipDeferredTools(t *testing.T) {
+	t.Run("tools breakpoint on the last undeferred tool", func(t *testing.T) {
+		params := anthropicsdk.MessageNewParams{
+			Tools: []anthropicsdk.ToolUnionParam{
+				toolParam("alpha"), toolParam("loader"), toolParam("groupGamma"),
+				deferredToolParam("groupDelta"), deferredToolParam("groupEpsilon"),
+			},
+		}
+		applyCacheBreakpoints(&params, &PromptCachingConfig{
+			Tools:                        &CacheBreakpoint{},
+			ToolsStaticPrefixEnd:         &CacheBreakpoint{TTL: CacheTTL1h},
+			ToolsStaticPrefixEndToolName: "loader",
+		}, nil)
+		if params.Tools[1].OfTool.CacheControl.Type == "" || params.Tools[2].OfTool.CacheControl.Type == "" {
+			t.Errorf("markers missing from the loader or the last undeferred tool: %+v", params.Tools)
+		}
+		if got := markerCount(t, params.Tools); got != 2 {
+			t.Errorf("tool marker count = %d, want 2 (none on a deferred tool)", got)
+		}
+	})
+
+	t.Run("static prefix end is the last undeferred tool", func(t *testing.T) {
+		params := anthropicsdk.MessageNewParams{
+			Tools: []anthropicsdk.ToolUnionParam{
+				toolParam("alpha"), toolParam("loader"), deferredToolParam("groupDelta"),
+			},
+		}
+		applyCacheBreakpoints(&params, &PromptCachingConfig{
+			Tools:                        &CacheBreakpoint{},
+			ToolsStaticPrefixEnd:         &CacheBreakpoint{TTL: CacheTTL1h},
+			ToolsStaticPrefixEndToolName: "loader",
+		}, nil)
+		if got := markerCount(t, params.Tools); got != 1 {
+			t.Errorf("tool marker count = %d, want 1 (the two breakpoints collapse on the loader)", got)
+		}
+		if params.Tools[1].OfTool.CacheControl.Type == "" {
+			t.Errorf("loader carries no marker: %+v", params.Tools[1].OfTool)
+		}
+	})
+
+	t.Run("named deferred tool gets no static prefix marker", func(t *testing.T) {
+		params := anthropicsdk.MessageNewParams{
+			Tools: []anthropicsdk.ToolUnionParam{toolParam("alpha"), deferredToolParam("loader")},
+		}
+		applyCacheBreakpoints(&params, &PromptCachingConfig{
+			ToolsStaticPrefixEnd:         &CacheBreakpoint{TTL: CacheTTL1h},
+			ToolsStaticPrefixEndToolName: "loader",
+		}, nil)
+		if got := markerCount(t, params.Tools); got != 0 {
+			t.Errorf("tool marker count = %d, want 0", got)
+		}
+	})
+}
