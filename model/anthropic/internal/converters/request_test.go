@@ -19,6 +19,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"google.golang.org/genai"
 )
 
@@ -386,5 +387,92 @@ func TestContentsToMessagesWithMarkedBlocks_OrdinalsFollowToolResultsFirst(t *te
 	}
 	if text := messages[2].Content[1].OfText; text == nil || text.Text != "Plot 7 photographs follow." {
 		t.Errorf("ordinal 3 names block %+v, want the marked text block", messages[2].Content[1])
+	}
+}
+
+// TestContentsToMessagesWithMarkedBlocks_RepeatedReferenceExpandsAtTheLatest
+// pins that a tool two responses reference expands only at the later one: the
+// earlier response keeps its other references, or converts to plain JSON
+// without the key when it has none left.
+func TestContentsToMessagesWithMarkedBlocks_RepeatedReferenceExpandsAtTheLatest(t *testing.T) {
+	loadResponse := func(id string, response map[string]any) []*genai.Content {
+		return []*genai.Content{
+			{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: id, Name: "lookupSpecies"}}}},
+			{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+				ID: id, Name: "lookupSpecies", Response: response,
+			}}}},
+		}
+	}
+	cases := []struct {
+		name                string
+		earlierReferences   []any
+		wantEarlierBlocks   []string
+		wantEarlierJSONText string
+	}{
+		{
+			name:                "the earlier response keeps its other references",
+			earlierReferences:   []any{"describeHabitat", "countSpecimens"},
+			wantEarlierBlocks:   []string{"reference:countSpecimens", "text"},
+			wantEarlierJSONText: "Tool result call_1, continued:\n" + `{"guide":"earlier survey"}`,
+		},
+		{
+			name:                "the earlier response with no reference left converts to plain JSON",
+			earlierReferences:   []any{"describeHabitat"},
+			wantEarlierBlocks:   []string{"json"},
+			wantEarlierJSONText: `{"guide":"earlier survey"}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			contents := []*genai.Content{genai.NewContentFromText("Survey plot 7 again.", "user")}
+			contents = append(contents, loadResponse("call_1", map[string]any{
+				"guide": "earlier survey", "toolReferences": tc.earlierReferences,
+			})...)
+			contents = append(contents, loadResponse("call_2", map[string]any{
+				"guide": "revised survey", "toolReferences": []string{"describeHabitat"},
+			})...)
+
+			messages, _, err := ContentsToMessagesWithMarkedBlocks(contents, toolReferenceOptions)
+			if err != nil {
+				t.Fatalf("ContentsToMessagesWithMarkedBlocks: %v", err)
+			}
+			if len(messages) != 5 {
+				t.Fatalf("messages = %d, want 5", len(messages))
+			}
+
+			describe := func(blocks []anthropic.ContentBlockParamUnion) ([]string, string) {
+				var shape []string
+				var text string
+				for _, block := range blocks {
+					switch {
+					case block.OfToolResult != nil:
+						for _, content := range block.OfToolResult.Content {
+							if content.OfToolReference != nil {
+								shape = append(shape, "reference:"+content.OfToolReference.ToolName)
+							} else if content.OfText != nil {
+								shape = append(shape, "json")
+								text = content.OfText.Text
+							}
+						}
+					case block.OfText != nil:
+						shape = append(shape, "text")
+						text = block.OfText.Text
+					}
+				}
+				return shape, text
+			}
+
+			earlierShape, earlierText := describe(messages[2].Content)
+			if !slices.Equal(earlierShape, tc.wantEarlierBlocks) || earlierText != tc.wantEarlierJSONText {
+				t.Errorf("earlier response = %v %q, want %v %q",
+					earlierShape, earlierText, tc.wantEarlierBlocks, tc.wantEarlierJSONText)
+			}
+			laterShape, laterText := describe(messages[4].Content)
+			wantLaterText := "Tool result call_2, continued:\n" + `{"guide":"revised survey"}`
+			if want := []string{"reference:describeHabitat", "text"}; !slices.Equal(laterShape, want) ||
+				laterText != wantLaterText {
+				t.Errorf("later response = %v %q, want %v %q", laterShape, laterText, want, wantLaterText)
+			}
+		})
 	}
 }

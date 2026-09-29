@@ -63,6 +63,12 @@ type ContentsOptions struct {
 	// reference to a tool the request does not define, and documents
 	// references only for deferred ones.
 	DeferredToolNames map[string]struct{}
+
+	// latestReferenceByToolName maps each tool name some function response
+	// lists under ToolReferencesResponseKey to the last such response in the
+	// contents, filled by ContentsToMessagesWithMarkedBlocks: a tool referenced
+	// by several responses is expanded only at the latest of them.
+	latestReferenceByToolName map[string]*genai.FunctionResponse
 }
 
 // ContentsToMessages converts genai Contents to Anthropic MessageParams.
@@ -93,6 +99,7 @@ func ContentsToMessagesWithMarkedBlocks(
 	// One sanitizer per request so a tool_use ID and its later tool_result ID
 	// are rewritten consistently (see toolUseIDSanitizer).
 	sanitizer := newToolUseIDSanitizer()
+	opts.latestReferenceByToolName = latestReferenceByToolName(contents, opts.ToolReferencesResponseKey)
 
 	var messages []anthropic.MessageParam
 	var markedBlockOrdinals []int
@@ -120,6 +127,34 @@ func ContentsToMessagesWithMarkedBlocks(
 	markedBlockOrdinals = moveToolResultsFirst(messages, markedBlockOrdinals)
 
 	return messages, markedBlockOrdinals, nil
+}
+
+// latestReferenceByToolName returns, for each tool name a function response in
+// the given contents lists under the given key, the last response that lists
+// it; nil when key is empty.
+func latestReferenceByToolName(contents []*genai.Content, key string) map[string]*genai.FunctionResponse {
+	if key == "" {
+		return nil
+	}
+	latest := map[string]*genai.FunctionResponse{}
+	for _, content := range contents {
+		if content == nil {
+			continue
+		}
+		for _, part := range content.Parts {
+			if part == nil || part.FunctionResponse == nil {
+				continue
+			}
+			names, ok := toolReferenceNames(part.FunctionResponse.Response, key)
+			if !ok {
+				continue
+			}
+			for _, name := range names {
+				latest[name] = part.FunctionResponse
+			}
+		}
+	}
+	return latest
 }
 
 // moveToolResultsFirst reorders each user message holding a tool_result block
@@ -462,9 +497,13 @@ func fileDataToBlock(fileData *genai.FileData) (*anthropic.ContentBlockParamUnio
 // in place into those tools' definitions so the model can call them; the rest
 // of the response follows as a text block labeled with the result's ID, since a
 // tool_result cannot mix tool_reference blocks with other content. A name the
-// request does not defer is dropped, and a response left with no reference
-// converts as one without the key would. Every other response converts to a
-// single tool_result of its JSON.
+// request does not defer is dropped, and so is a name a later response in the
+// contents references again, so each tool expands once, at its latest
+// reference — a caller that makes a tool callable again after withdrawing it
+// leaves the earlier result converting as it did while the tool was
+// withdrawn. A response left with no reference converts as one without the
+// key would. Every other response converts to a single tool_result of its
+// JSON.
 func functionResponseToBlocks(
 	resp *genai.FunctionResponse,
 	sanitizer *toolUseIDSanitizer,
@@ -484,9 +523,13 @@ func functionResponseToBlocks(
 			}
 		}
 		for _, name := range names {
-			if _, deferred := opts.DeferredToolNames[name]; deferred && !slices.Contains(references, name) {
-				references = append(references, name)
+			if _, deferred := opts.DeferredToolNames[name]; !deferred || slices.Contains(references, name) {
+				continue
 			}
+			if latest, tracked := opts.latestReferenceByToolName[name]; tracked && latest != resp {
+				continue
+			}
+			references = append(references, name)
 		}
 	}
 

@@ -203,7 +203,8 @@ type Config struct {
 	// other content. A name the request does not defer is dropped rather than
 	// sent, since Anthropic rejects a reference to a tool it does not define;
 	// a response left with no reference converts to the plain JSON of the
-	// response without the key. A reference stays expanded for as long as it
+	// response without the key. A tool several responses reference expands
+	// only at the latest of them. A reference stays expanded for as long as it
 	// stays in the conversation. Empty (the default) disables references.
 	ToolReferencesResponseKey string
 
