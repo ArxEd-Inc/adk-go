@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 )
 
@@ -356,6 +357,190 @@ func TestFunctionDeclarationToToolAliasesLongTopLevelKey(t *testing.T) {
 	}
 	if got := tool.OfTool.InputSchema.Required; len(got) != 1 || got[0] != alias {
 		t.Errorf("required = %v, want [%q]", got, alias)
+	}
+}
+
+// searchBooksResponseSchema returns a documented response schema for the searchBooks fixture,
+// shaped as schemas generated from typed result objects are: a root $ref into $defs.
+func searchBooksResponseSchema() map[string]any {
+	return map[string]any{
+		"$ref": "#/$defs/SearchBooksResult",
+		"$defs": map[string]any{
+			"SearchBooksResult": map[string]any{
+				"type":        "object",
+				"description": "The matching books, best match first.",
+				"properties": map[string]any{
+					"books": map[string]any{"type": "array", "items": map[string]any{"$ref": "#/$defs/Book"}},
+				},
+			},
+			"Book": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"title":   map[string]any{"type": "string"},
+					"on_loan": map[string]any{"type": "boolean", "description": "on_loan is true when every copy is checked out."},
+				},
+			},
+		},
+	}
+}
+
+// TestFunctionDeclarationToToolAppendsDocumentedResponseSchema verifies that a documented
+// response schema, which the Messages API's tool definition has no field for, reaches the model
+// appended to the tool description as compact JSON with sorted keys, after a blank line and a
+// lead-in, and that the input schema is unaffected.
+func TestFunctionDeclarationToToolAppendsDocumentedResponseSchema(t *testing.T) {
+	fd := &genai.FunctionDeclaration{
+		Name:                 "searchBooks",
+		Description:          "searches books",
+		ParametersJsonSchema: map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}}},
+		ResponseJsonSchema:   searchBooksResponseSchema(),
+	}
+
+	tool := FunctionDeclarationToTool(fd, map[string]string{})
+	want := "searches books\n\nThe result conforms to this JSON Schema: " +
+		`{"$defs":{"Book":{"properties":{"on_loan":{"description":"on_loan is true when every copy is checked out.","type":"boolean"},` +
+		`"title":{"type":"string"}},"type":"object"},"SearchBooksResult":{"description":"The matching books, best match first.",` +
+		`"properties":{"books":{"items":{"$ref":"#/$defs/Book"},"type":"array"}},"type":"object"}},"$ref":"#/$defs/SearchBooksResult"}`
+	if got := tool.OfTool.Description.Value; got != want {
+		t.Errorf("description =\n%s\nwant\n%s", got, want)
+	}
+
+	// The conversion is byte-stable, as prompt caching needs, and leaves the input schema as it is
+	// without a response schema.
+	again := FunctionDeclarationToTool(fd, map[string]string{})
+	if again.OfTool.Description.Value != tool.OfTool.Description.Value {
+		t.Errorf("description differs between conversions:\n%s\n%s", tool.OfTool.Description.Value, again.OfTool.Description.Value)
+	}
+	withoutResponse := *fd
+	withoutResponse.ResponseJsonSchema = nil
+	gotInput, err := json.Marshal(tool.OfTool.InputSchema)
+	if err != nil {
+		t.Fatalf("marshal input schema: %v", err)
+	}
+	wantInput, err := json.Marshal(FunctionDeclarationToTool(&withoutResponse, map[string]string{}).OfTool.InputSchema)
+	if err != nil {
+		t.Fatalf("marshal input schema: %v", err)
+	}
+	if string(gotInput) != string(wantInput) {
+		t.Errorf("input_schema = %s, want %s", gotInput, wantInput)
+	}
+}
+
+// TestFunctionDeclarationToToolResponseSchemaForms verifies that every form a response schema can
+// take renders as JSON Schema: a *jsonschema.Schema, whose property order is not carried into the
+// sorted rendering, and a *genai.Schema in either Response or ResponseJsonSchema, which converts
+// through SchemaToMap (lowercase types) rather than genai's own JSON form. It also covers the
+// joining: a trailing newline on the base description is trimmed, and an empty base description
+// gets no leading separator.
+func TestFunctionDeclarationToToolResponseSchemaForms(t *testing.T) {
+	const lead = "The result conforms to this JSON Schema: "
+	genaiSchema := &genai.Schema{
+		Type:        genai.TypeObject,
+		Description: "A page of matching books.",
+		Properties:  map[string]*genai.Schema{"total": {Type: genai.TypeInteger}},
+	}
+	const genaiSchemaJSON = `{"description":"A page of matching books.","properties":{"total":{"type":"integer"}},"type":"object"}`
+
+	cases := []struct {
+		name string
+		fd   *genai.FunctionDeclaration
+		want string
+	}{
+		{
+			name: "jsonschema.Schema with property order",
+			fd: &genai.FunctionDeclaration{
+				Name:        "searchBooks",
+				Description: "searches books\n",
+				ResponseJsonSchema: &jsonschema.Schema{
+					Type:          "object",
+					Description:   "The matching books.",
+					Properties:    map[string]*jsonschema.Schema{"total": {Type: "integer"}, "books": {Type: "array"}},
+					PropertyOrder: []string{"total", "books"},
+				},
+			},
+			want: "searches books\n\n" + lead +
+				`{"description":"The matching books.","properties":{"books":{"type":"array"},"total":{"type":"integer"}},"type":"object"}`,
+		},
+		{
+			name: "genai.Schema in Response",
+			fd:   &genai.FunctionDeclaration{Name: "searchBooks", Description: "searches books", Response: genaiSchema},
+			want: "searches books\n\n" + lead + genaiSchemaJSON,
+		},
+		{
+			name: "genai.Schema in ResponseJsonSchema",
+			fd:   &genai.FunctionDeclaration{Name: "searchBooks", Description: "searches books", ResponseJsonSchema: genaiSchema},
+			want: "searches books\n\n" + lead + genaiSchemaJSON,
+		},
+		{
+			name: "empty base description",
+			fd:   &genai.FunctionDeclaration{Name: "searchBooks", Response: genaiSchema},
+			want: lead + genaiSchemaJSON,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FunctionDeclarationToTool(tc.fd, map[string]string{}).OfTool.Description.Value
+			if got != tc.want {
+				t.Errorf("description =\n%s\nwant\n%s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFunctionDeclarationToToolLeavesUndocumentedResponseSchemaOut verifies that a response schema
+// carrying no description or title leaves the tool description byte-for-byte unchanged: it only
+// restates what the result itself shows. A property named "description" is not documentation, nor
+// is a "description" key in a value under examples or default, and an empty *jsonschema.Schema
+// (which marshals as true) and a missing schema render nothing.
+func TestFunctionDeclarationToToolLeavesUndocumentedResponseSchemaOut(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema any
+	}{
+		{name: "nil"},
+		{name: "empty jsonschema.Schema", schema: &jsonschema.Schema{}},
+		{
+			name: "structure only",
+			schema: map[string]any{
+				"type":                 "object",
+				"properties":           map[string]any{"title": map[string]any{"type": "string"}},
+				"additionalProperties": false,
+			},
+		},
+		{
+			name: "property named description and described values",
+			schema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"description": map[string]any{"type": "string"}},
+				"examples":   []any{map[string]any{"description": "A novel set at sea."}},
+				"default":    map[string]any{"description": "No description yet."},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fd := &genai.FunctionDeclaration{Name: "searchBooks", Description: "searches books\n", ResponseJsonSchema: tc.schema}
+			if got := FunctionDeclarationToTool(fd, map[string]string{}).OfTool.Description.Value; got != fd.Description {
+				t.Errorf("description = %q, want it unchanged as %q", got, fd.Description)
+			}
+		})
+	}
+}
+
+// TestFunctionDeclarationToToolResponseSchemaUnescaped verifies that &, < and > in a response
+// schema's documentation reach the model as written rather than as JSON's HTML-safe escapes.
+func TestFunctionDeclarationToToolResponseSchemaUnescaped(t *testing.T) {
+	fd := &genai.FunctionDeclaration{
+		Name:        "searchBooks",
+		Description: "searches books",
+		ResponseJsonSchema: map[string]any{
+			"type":        "string",
+			"description": `The genre, such as "Rock & Roll" or "<unclassified>".`,
+		},
+	}
+	got := FunctionDeclarationToTool(fd, map[string]string{}).OfTool.Description.Value
+	if !strings.Contains(got, `"The genre, such as \"Rock & Roll\" or \"<unclassified>\"."`) {
+		t.Errorf("description = %s, want &, < and > unescaped", got)
 	}
 }
 

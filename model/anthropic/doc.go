@@ -24,9 +24,11 @@
 // effort for adaptive-capable models, or a budget_tokens form for models that
 // reject adaptive thinking (selected per model via Config.ThinkingMode); tool-use
 // IDs are sanitized to Anthropic's required shape; tool input schemas resolve a root
-// $ref and alias over-long top-level property keys; non-streaming requests are
-// issued as streaming internally (Vertex rejects large non-streaming calls); a
-// refusal (HTTP 200 with stop_reason "refusal", from the newer models' safety
+// $ref and alias over-long top-level property keys; a function's documented
+// response schema, which the Messages API has no field for, is appended to its
+// tool description; non-streaming requests are issued as streaming internally
+// (Vertex rejects large non-streaming calls); a refusal (HTTP 200 with
+// stop_reason "refusal", from the newer models' safety
 // classifiers or the model itself) is surfaced as an error response carrying its
 // stop_details rather than as a silent empty turn; and redacted thinking is round-tripped
 // faithfully (its data rides in the thought signature), while a thought that

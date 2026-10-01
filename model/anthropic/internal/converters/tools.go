@@ -18,6 +18,7 @@
 package converters
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -85,14 +86,130 @@ func IsDeferredTool(tool anthropic.ToolUnionParam) bool {
 
 // FunctionDeclarationToTool converts a genai FunctionDeclaration to an Anthropic ToolUnionParam,
 // recording any top-level property-key aliases it creates into aliases (alias -> original name).
+// A documented response schema is appended to the tool description (see functionDescription).
 func FunctionDeclarationToTool(fd *genai.FunctionDeclaration, aliases map[string]string) anthropic.ToolUnionParam {
 	return anthropic.ToolUnionParam{
 		OfTool: &anthropic.ToolParam{
 			Name:        fd.Name,
-			Description: anthropic.String(fd.Description),
+			Description: anthropic.String(functionDescription(fd)),
 			InputSchema: functionInputSchema(fd, aliases),
 		},
 	}
+}
+
+// responseSchemaLeadIn introduces a function's response schema where functionDescription appends
+// it to the tool description.
+const responseSchemaLeadIn = "The result conforms to this JSON Schema: "
+
+// functionDescription returns the FunctionDeclaration's description with its response schema
+// appended as compact JSON when that schema carries documentation. The Messages API's tool
+// definition has no field for a response schema, so without this the documentation a declaration
+// gives its result (what fields mean, which values occur) never reaches the model. A response
+// schema with no description or title anywhere only restates the structure the result itself
+// shows, so it is left out and the description is returned unchanged. Map keys encode sorted, so
+// the description is byte-stable across requests, as prompt caching needs.
+func functionDescription(fd *genai.FunctionDeclaration) string {
+	schema := functionResponseSchemaMap(fd)
+	if !schemaIsDocumented(schema) {
+		return fd.Description
+	}
+
+	var schemaJSON bytes.Buffer
+	encoder := json.NewEncoder(&schemaJSON)
+	// Leave &, < and > readable, as they are in the rest of the description.
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(schema); err != nil {
+		return fd.Description
+	}
+	renderedSchema := responseSchemaLeadIn + strings.TrimSuffix(schemaJSON.String(), "\n")
+
+	description := strings.TrimRight(fd.Description, " \t\n")
+	if description == "" {
+		return renderedSchema
+	}
+	return description + "\n\n" + renderedSchema
+}
+
+// functionResponseSchemaMap returns the FunctionDeclaration's response schema as a JSON Schema
+// map, preferring ResponseJsonSchema over Response. A *genai.Schema, in either field, converts
+// through SchemaToMap, since genai's own JSON form of it is not JSON Schema; any other value
+// round-trips through JSON. Returns nil when no response schema is set, and for a boolean schema
+// (an empty *jsonschema.Schema marshals as true).
+func functionResponseSchemaMap(fd *genai.FunctionDeclaration) map[string]any {
+	switch {
+	case fd.ResponseJsonSchema != nil:
+		if schema, ok := fd.ResponseJsonSchema.(*genai.Schema); ok {
+			return SchemaToMap(schema)
+		}
+		return RawJSONSchemaToMap(fd.ResponseJsonSchema)
+	case fd.Response != nil:
+		return SchemaToMap(fd.Response)
+	default:
+		return nil
+	}
+}
+
+var (
+	// subschemaMapKeywords name the JSON Schema keywords whose values map names to subschemas.
+	subschemaMapKeywords = []string{"$defs", "definitions", "properties", "patternProperties", "dependentSchemas"}
+
+	// subschemaArrayKeywords name the JSON Schema keywords whose values are arrays of subschemas
+	// (items only in its array form; subschemaKeywords covers the single-schema form).
+	subschemaArrayKeywords = []string{"allOf", "anyOf", "oneOf", "prefixItems", "items"}
+
+	// subschemaKeywords name the JSON Schema keywords whose values are single subschemas.
+	subschemaKeywords = []string{
+		"items", "additionalProperties", "additionalItems", "unevaluatedProperties", "unevaluatedItems",
+		"contains", "propertyNames", "not", "if", "then", "else", "contentSchema",
+	}
+)
+
+// schemaIsDocumented reports whether the given JSON Schema, or any subschema it contains, has a
+// non-empty description or title. Only subschema keywords are searched, so a property named
+// "description" is a subschema rather than documentation, and the values under enum, const,
+// default and examples are never mistaken for schemas. Boolean schemas carry no documentation.
+func schemaIsDocumented(schema any) bool {
+	schemaMap, ok := schema.(map[string]any)
+	if !ok {
+		return false
+	}
+
+	for _, keyword := range []string{"description", "title"} {
+		if text, ok := schemaMap[keyword].(string); ok && text != "" {
+			return true
+		}
+	}
+	for _, keyword := range subschemaMapKeywords {
+		if subschemas, ok := schemaMap[keyword].(map[string]any); ok {
+			for _, subschema := range subschemas {
+				if schemaIsDocumented(subschema) {
+					return true
+				}
+			}
+		}
+	}
+	for _, keyword := range subschemaArrayKeywords {
+		switch subschemas := schemaMap[keyword].(type) {
+		case []any:
+			for _, subschema := range subschemas {
+				if schemaIsDocumented(subschema) {
+					return true
+				}
+			}
+		case []map[string]any: // SchemaToMap's anyOf
+			for _, subschema := range subschemas {
+				if schemaIsDocumented(subschema) {
+					return true
+				}
+			}
+		}
+	}
+	for _, keyword := range subschemaKeywords {
+		if schemaIsDocumented(schemaMap[keyword]) {
+			return true
+		}
+	}
+	return false
 }
 
 // functionInputSchema builds the Anthropic tool input schema from a FunctionDeclaration. It
