@@ -396,6 +396,11 @@ func SchemaToMap(schema *genai.Schema) map[string]any {
 		result["type"] = strings.ToLower(string(schema.Type))
 	}
 
+	// Title
+	if schema.Title != "" {
+		result["title"] = schema.Title
+	}
+
 	// Description
 	if schema.Description != "" {
 		result["description"] = schema.Description

@@ -429,7 +429,8 @@ func TestFunctionDeclarationToToolAppendsDocumentedResponseSchema(t *testing.T) 
 // TestFunctionDeclarationToToolResponseSchemaForms verifies that every form a response schema can
 // take renders as JSON Schema: a *jsonschema.Schema, whose property order is not carried into the
 // sorted rendering, and a *genai.Schema in either Response or ResponseJsonSchema, which converts
-// through SchemaToMap (lowercase types) rather than genai's own JSON form. It also covers the
+// through SchemaToMap (lowercase types, titles kept) rather than genai's own JSON form; a title
+// alone documents a genai.Schema as it does any other schema. It also covers the
 // joining: a trailing newline on the base description is trimmed, and an empty base description
 // gets no leading separator.
 func TestFunctionDeclarationToToolResponseSchemaForms(t *testing.T) {
@@ -440,6 +441,11 @@ func TestFunctionDeclarationToToolResponseSchemaForms(t *testing.T) {
 		Properties:  map[string]*genai.Schema{"total": {Type: genai.TypeInteger}},
 	}
 	const genaiSchemaJSON = `{"description":"A page of matching books.","properties":{"total":{"type":"integer"}},"type":"object"}`
+	titleOnlyGenaiSchema := &genai.Schema{
+		Type:       genai.TypeObject,
+		Properties: map[string]*genai.Schema{"total": {Type: genai.TypeInteger, Title: "Matching book count"}},
+	}
+	const titleOnlyGenaiSchemaJSON = `{"properties":{"total":{"title":"Matching book count","type":"integer"}},"type":"object"}`
 
 	cases := []struct {
 		name string
@@ -475,6 +481,16 @@ func TestFunctionDeclarationToToolResponseSchemaForms(t *testing.T) {
 			name: "empty base description",
 			fd:   &genai.FunctionDeclaration{Name: "searchBooks", Response: genaiSchema},
 			want: lead + genaiSchemaJSON,
+		},
+		{
+			name: "title-only genai.Schema in Response",
+			fd:   &genai.FunctionDeclaration{Name: "searchBooks", Description: "searches books", Response: titleOnlyGenaiSchema},
+			want: "searches books\n\n" + lead + titleOnlyGenaiSchemaJSON,
+		},
+		{
+			name: "title-only genai.Schema in ResponseJsonSchema",
+			fd:   &genai.FunctionDeclaration{Name: "searchBooks", Description: "searches books", ResponseJsonSchema: titleOnlyGenaiSchema},
+			want: "searches books\n\n" + lead + titleOnlyGenaiSchemaJSON,
 		},
 	}
 	for _, tc := range cases {
