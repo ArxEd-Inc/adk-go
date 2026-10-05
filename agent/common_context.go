@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"sync"
 	"time"
 
 	"google.golang.org/genai"
@@ -477,6 +478,11 @@ func newTrackedArtifacts(inner Artifacts, actions *session.EventActions) Artifac
 type trackedArtifacts struct {
 	Artifacts
 	actions *session.EventActions
+
+	// mu guards actions.ArtifactDelta, which concurrent Saves through one
+	// context share. It is a leaf lock, taken only after the inner Save has
+	// returned, so saves still upload in parallel.
+	mu sync.Mutex
 }
 
 func (a *trackedArtifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
@@ -485,11 +491,16 @@ func (a *trackedArtifacts) Save(ctx context.Context, name string, data *genai.Pa
 		return resp, err
 	}
 	if a.actions != nil {
+		a.mu.Lock()
 		if a.actions.ArtifactDelta == nil {
 			a.actions.ArtifactDelta = make(map[string]int64)
 		}
-		// TODO: RWLock, check the version stored is newer in case multiple tools save the same file.
-		a.actions.ArtifactDelta[name] = resp.Version
+		// Concurrent saves of one name can complete out of version order, so
+		// record a version only if it is newer than the one already recorded.
+		if cur, ok := a.actions.ArtifactDelta[name]; !ok || resp.Version > cur {
+			a.actions.ArtifactDelta[name] = resp.Version
+		}
+		a.mu.Unlock()
 	}
 	return resp, nil
 }
