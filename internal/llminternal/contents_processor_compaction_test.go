@@ -131,8 +131,9 @@ func TestContentsRequestProcessor_Compaction(t *testing.T) {
 		},
 		{
 			// The summary covers only q1, so the call stays raw. Unanswered
-			// and not long-running, it is dropped at assembly.
-			name: "an unanswered call left outside the summary is dropped",
+			// and not long-running, upstream drops it at assembly; the fork
+			// keeps it.
+			name: "an unanswered call left outside the summary is kept",
 			events: []*session.Event{
 				compactionTextEvent("user", 1, "q1"),
 				{
@@ -148,6 +149,7 @@ func TestContentsRequestProcessor_Compaction(t *testing.T) {
 			},
 			want: []*genai.Content{
 				genai.NewContentFromText("Earlier: the user asked one question.", "model"),
+				{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "unanswered", Name: "slow_tool"}}}},
 				genai.NewContentFromText("q2", "user"),
 			},
 		},

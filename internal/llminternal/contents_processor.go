@@ -229,11 +229,12 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 	if err != nil {
 		return nil, err
 	}
-	// Runs after both rearrangements: dropping a trailing unanswered call
-	// first would leave a function response as the last event and let
-	// rearrangeEventsForLatestFunctionResponse discard the turns between it
-	// and its call.
-	filtered = dropOrphanedFunctionCalls(filtered)
+	// Unanswered function calls stay in the request, unlike upstream, which
+	// drops them here with dropOrphanedFunctionCalls (#1669). A call
+	// interrupted before its result was recorded may still have taken effect,
+	// so a BeforeModelCallback can answer it, for example with an error
+	// response telling the model so, rather than the model losing all trace
+	// of it.
 
 	var contents []*genai.Content
 	for _, ev := range filtered {

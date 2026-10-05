@@ -1440,8 +1440,9 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		{
 			// A call that never receives a response is reachable: base_flow
 			// creates no response event for a long-running tool, which it
-			// lists in LongRunningToolIDs so that dropOrphanedFunctionCalls
-			// keeps it. Such a call has an empty responseEventIndicesSet,
+			// lists in LongRunningToolIDs, and an interrupted turn leaves an
+			// unanswered call too. Upstream keeps only the long-running one;
+			// the fork keeps both. Such a call has an empty responseEventIndicesSet,
 			// so it is never routed to the tail. It keeps its order relative to
 			// the other events that stay put, which leaves it ahead of the
 			// completed pair that does move to the tail.
@@ -1470,8 +1471,10 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		},
 		{
 			// The same history when the unanswered call is not pending: a
-			// turn interrupted before the tool ran. The call is dropped.
-			name: "Late async completion drops an interrupted call from history",
+			// turn interrupted before the tool ran. Upstream drops the call;
+			// the fork keeps it, so a BeforeModelCallback can answer it, and
+			// the contents match the long-running case above.
+			name: "Late async completion keeps an interrupted call in history",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Plan how to add feature Q", "user")}},
 				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncPlan, "model")}},
@@ -1481,14 +1484,15 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			},
 			want: []*genai.Content{
 				genai.NewContentFromText("Plan how to add feature Q", "user"),
+				NewContentFromFunctionCall(fcAsyncUnanswered, "model"),
 				NewContentFromFunctionCall(fcAsyncPlan, "model"),
 				NewContentFromFunctionResponse(frAsyncPlanFinal, "user"),
 			},
 		},
 		{
 			// A turn that ended between a call and its result, followed by a
-			// new user message.
-			name: "Unanswered call at the end of a turn is dropped",
+			// new user message. Upstream drops the call; the fork keeps it.
+			name: "Unanswered call at the end of a turn is kept",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("search for test", "user")}},
 				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncUnanswered, "model")}},
@@ -1496,11 +1500,14 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			},
 			want: []*genai.Content{
 				genai.NewContentFromText("search for test", "user"),
+				NewContentFromFunctionCall(fcAsyncUnanswered, "model"),
 				genai.NewContentFromText("are you still there?", "user"),
 			},
 		},
 		{
-			name: "Unanswered call mid-history is dropped and the text around it kept",
+			// Upstream drops the call and keeps the text part beside it; the
+			// fork keeps both parts.
+			name: "Unanswered call mid-history is kept with the text around it",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Plan how to add feature Q", "user")}},
 				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncStatus, "model")}},
@@ -1515,14 +1522,19 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 				genai.NewContentFromText("Plan how to add feature Q", "user"),
 				NewContentFromFunctionCall(fcAsyncStatus, "model"),
 				NewContentFromFunctionResponse(frAsyncStatus, "user"),
-				genai.NewContentFromText("Notifying ops first.", "model"),
+				{Role: "model", Parts: []*genai.Part{
+					{Text: "Notifying ops first."},
+					{FunctionCall: fcAsyncUnanswered},
+				}},
 				genai.NewContentFromText("Cancel that", "user"),
 			},
 		},
 		{
-			// Dropping the trailing call must not leave the async response as
-			// the last event, which would let the latest-response
-			// rearrangement discard the text turns between it and its call.
+			// Upstream drops the trailing call, which must not leave the async
+			// response as the last event, or the latest-response rearrangement
+			// would discard the text turns between it and its call. The fork
+			// keeps the call, so the contents end on it, a model turn, and get
+			// the synthetic continuation turn.
 			name: "Trailing unanswered call after an async completion keeps the interleaved turns",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Plan how to add feature Q", "user")}},
@@ -1538,6 +1550,7 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 				NewContentFromFunctionResponse(frAsyncPlanFinal, "user"),
 				genai.NewContentFromText("While waiting, tell me a joke", "user"),
 				genai.NewContentFromText("Why did the chicken cross the road?", "model"),
+				NewContentFromFunctionCall(fcAsyncUnanswered, "model"),
 			},
 		},
 		{
