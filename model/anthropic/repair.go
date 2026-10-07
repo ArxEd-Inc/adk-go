@@ -17,6 +17,7 @@ package anthropic
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 
 	anthropicsdk "github.com/anthropics/anthropic-sdk-go"
 )
@@ -49,6 +50,31 @@ func repairAccumulatedToolInput(message *anthropicsdk.Message, event anthropicsd
 	if repaired, changed := quoteBareJSONSentinels(block.Input); changed && json.Valid(repaired) {
 		block.Input = repaired
 	}
+}
+
+// toolInputErrorAtStop returns an error when event is the content_block_stop of a tool_use
+// block whose accumulated input is still not valid JSON after repairAccumulatedToolInput, and
+// nil otherwise. [anthropicsdk.Message.Accumulate] once returned this error itself; it now
+// empties such input to {} silently, which would dispatch the tool call with no arguments
+// instead of failing the turn. Failing keeps the stream's outcome what it was: an error the
+// caller can retry, never a call the model did not make.
+func toolInputErrorAtStop(message *anthropicsdk.Message, event anthropicsdk.MessageStreamEventUnion) error {
+	stop, ok := event.AsAny().(anthropicsdk.ContentBlockStopEvent)
+	if !ok {
+		return nil
+	}
+	if stop.Index < 0 || stop.Index >= int64(len(message.Content)) {
+		return nil
+	}
+	block := &message.Content[stop.Index]
+	if block.Type != "tool_use" || len(block.Input) == 0 {
+		return nil
+	}
+	var input any
+	if err := json.Unmarshal(block.Input, &input); err != nil {
+		return fmt.Errorf("tool_use block %d has invalid input JSON: %w", stop.Index, err)
+	}
+	return nil
 }
 
 // quoteBareJSONSentinels rewrites bare Infinity, -Infinity, and NaN value tokens in b

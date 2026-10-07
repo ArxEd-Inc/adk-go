@@ -38,7 +38,7 @@ require (
 )
 
 require (
-	github.com/anthropics/anthropic-sdk-go v1.52.0
+	github.com/anthropics/anthropic-sdk-go v1.78.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 )
 

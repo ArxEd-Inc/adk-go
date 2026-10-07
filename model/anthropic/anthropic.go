@@ -207,6 +207,9 @@ func (m *anthropicModel) generate(ctx context.Context, req *model.LLMRequest) (*
 	for stream.Next() {
 		event := stream.Current()
 		repairAccumulatedToolInput(&message, event)
+		if err := toolInputErrorAtStop(&message, event); err != nil {
+			return nil, fmt.Errorf("failed to accumulate message: %w", err)
+		}
 		if err := message.Accumulate(event); err != nil {
 			return nil, fmt.Errorf("failed to accumulate message: %w", err)
 		}
@@ -254,6 +257,10 @@ func (m *anthropicModel) generateStream(ctx context.Context, req *model.LLMReque
 
 			// Accumulate the message
 			repairAccumulatedToolInput(&message, event)
+			if err := toolInputErrorAtStop(&message, event); err != nil {
+				yield(nil, fmt.Errorf("failed to accumulate message: %w", err))
+				return
+			}
 			if err := message.Accumulate(event); err != nil {
 				yield(nil, fmt.Errorf("failed to accumulate message: %w", err))
 				return

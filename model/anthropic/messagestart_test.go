@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"google.golang.org/genai"
@@ -188,5 +189,51 @@ func TestGenerateStreamWithoutCallbackIsUnchanged(t *testing.T) {
 	}
 	if !responses[1].TurnComplete {
 		t.Error("final response is not marked TurnComplete")
+	}
+}
+
+// TestDroppedStreamIsNotReissued pins that a connection dropping after message_start fails the call
+// rather than re-sending the request: the SDK retries a response whose body it reads itself, and a
+// streamed body is the caller's to read, so a re-issued stream could only come from the SDK changing
+// that — which would invoke the callback again and count the request's input usage twice.
+func TestDroppedStreamIsNotReissued(t *testing.T) {
+	for _, stream := range []bool{true, false} {
+		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
+			var requestCount atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requestCount.Add(1)
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte("event: message_start\n" +
+					`data: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"claude-test","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":7,"output_tokens":1}}}` + "\n\n"))
+				w.(http.Flusher).Flush()
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err != nil {
+					t.Errorf("hijack: %v", err)
+					return
+				}
+				_ = conn.Close()
+			}))
+			t.Cleanup(server.Close)
+			llm := newMessageStartTestModel(t, server.URL)
+
+			var callbackCount int
+			ctx := ContextWithMessageStartCallback(t.Context(), func(MessageStartUsage) { callbackCount++ })
+			var gotErr error
+			for _, err := range llm.GenerateContent(ctx, messageStartTestRequest(), stream) {
+				if err != nil {
+					gotErr = err
+				}
+			}
+
+			if gotErr == nil {
+				t.Fatal("a dropped stream yielded no error")
+			}
+			if got := requestCount.Load(); got != 1 {
+				t.Errorf("server received %d requests, want 1", got)
+			}
+			if callbackCount != 1 {
+				t.Errorf("callback invoked %d times, want 1", callbackCount)
+			}
+		})
 	}
 }

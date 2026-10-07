@@ -840,7 +840,7 @@ func TestMessageToLLMResponseRefusal(t *testing.T) {
 	}
 }
 
-// TestStopReasonToFinishReason covers the refusal mapping (and the common cases).
+// TestStopReasonToFinishReason covers the refusal and context-window mappings (and the common cases).
 func TestStopReasonToFinishReason(t *testing.T) {
 	cases := map[anthropic.StopReason]genai.FinishReason{
 		anthropic.StopReasonRefusal:      genai.FinishReasonSafety,
@@ -848,6 +848,8 @@ func TestStopReasonToFinishReason(t *testing.T) {
 		anthropic.StopReasonToolUse:      genai.FinishReasonStop,
 		anthropic.StopReasonMaxTokens:    genai.FinishReasonMaxTokens,
 		anthropic.StopReasonStopSequence: genai.FinishReasonStop,
+
+		anthropic.StopReasonModelContextWindowExceeded: genai.FinishReasonMaxTokens,
 	}
 	for sr, want := range cases {
 		if got := StopReasonToFinishReason(sr); got != want {

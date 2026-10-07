@@ -325,6 +325,10 @@ func StopReasonToFinishReason(sr anthropic.StopReason) genai.FinishReason {
 		return genai.FinishReasonStop
 	case anthropic.StopReasonMaxTokens:
 		return genai.FinishReasonMaxTokens
+	case anthropic.StopReasonModelContextWindowExceeded:
+		// Output stopped because the context window filled: like max_tokens, the
+		// response is cut short by a token limit.
+		return genai.FinishReasonMaxTokens
 	case anthropic.StopReasonRefusal:
 		// Anthropic's safety classifier declined (HTTP 200, not an error). Map
 		// to the closest genai reason so callers can branch on it. A retry layer

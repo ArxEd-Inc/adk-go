@@ -51,6 +51,9 @@ func accumulateEvents(t *testing.T, rawEvents []string, repair bool) (*anthropic
 		if repair {
 			repairAccumulatedToolInput(&message, event)
 		}
+		if err := toolInputErrorAtStop(&message, event); err != nil {
+			return nil, err
+		}
 		if err := message.Accumulate(event); err != nil {
 			return nil, err
 		}
@@ -58,9 +61,9 @@ func accumulateEvents(t *testing.T, rawEvents []string, repair bool) (*anthropic
 	return &message, nil
 }
 
-// TestAccumulateBareInfinityFailsWithoutRepair pins the SDK failure the repair exists
-// for: bare Infinity in accumulated tool input kills Accumulate at content_block_stop,
-// before the tool call is ever materialized.
+// TestAccumulateBareInfinityFailsWithoutRepair pins the failure the repair exists for:
+// bare Infinity in accumulated tool input fails the stream at content_block_stop, before
+// the tool call is ever materialized, rather than reaching dispatch with empty input.
 func TestAccumulateBareInfinityFailsWithoutRepair(t *testing.T) {
 	_, err := accumulateEvents(t, bareInfinityEvents(), false)
 	if err == nil {
