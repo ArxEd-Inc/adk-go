@@ -43,7 +43,8 @@ func TestConvertRequestPerModelEffort(t *testing.T) {
 	m := &anthropicModel{name: "claude-opus-4-8", defaultMaxTokens: 64000, effort: EffortXHigh}
 	params, _, err := m.convertRequest(userReq(&genai.GenerateContentConfig{
 		ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh},
-	}))
+	}), nil)
+
 	if err != nil {
 		t.Fatalf("convertRequest: %v", err)
 	}
@@ -61,7 +62,8 @@ func TestConvertRequestEffortFallsBackToLevel(t *testing.T) {
 	m := &anthropicModel{name: "claude-sonnet-4-6", defaultMaxTokens: 64000}
 	params, _, err := m.convertRequest(userReq(&genai.GenerateContentConfig{
 		ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh},
-	}))
+	}), nil)
+
 	if err != nil {
 		t.Fatalf("convertRequest: %v", err)
 	}
@@ -75,7 +77,7 @@ func TestConvertRequestEffortFallsBackToLevel(t *testing.T) {
 // with one.
 func TestConvertRequestNoThinking(t *testing.T) {
 	m := &anthropicModel{name: "claude-sonnet-4-6", defaultMaxTokens: 64000, effort: EffortHigh}
-	params, _, err := m.convertRequest(userReq(&genai.GenerateContentConfig{}))
+	params, _, err := m.convertRequest(userReq(&genai.GenerateContentConfig{}), nil)
 	if err != nil {
 		t.Fatalf("convertRequest: %v", err)
 	}
@@ -95,7 +97,8 @@ func TestConvertRequestBudgetModeThinking(t *testing.T) {
 	m := &anthropicModel{name: "claude-haiku-4-5", defaultMaxTokens: 64000, thinkingMode: ThinkingModeBudget}
 	params, _, err := m.convertRequest(userReq(&genai.GenerateContentConfig{
 		ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh},
-	}))
+	}), nil)
+
 	if err != nil {
 		t.Fatalf("convertRequest: %v", err)
 	}
@@ -120,7 +123,8 @@ func TestConvertRequestDropsSamplingParams(t *testing.T) {
 	params, _, err := m.convertRequest(userReq(&genai.GenerateContentConfig{
 		Temperature: ptr(float32(0.7)),
 		TopP:        ptr(float32(0.9)),
-	}))
+	}), nil)
+
 	if err != nil {
 		t.Fatalf("convertRequest: %v", err)
 	}
@@ -146,7 +150,8 @@ func TestConvertRequestResponseJsonSchema(t *testing.T) {
 			"properties": map[string]any{"name": map[string]any{"type": "string"}},
 			"required":   []any{"name"},
 		},
-	}))
+	}), nil)
+
 	if err != nil {
 		t.Fatalf("convertRequest: %v", err)
 	}
@@ -218,7 +223,8 @@ func TestConvertRequestMarkedPartCarriesCacheControl(t *testing.T) {
 			{Text: "Specimen notes for plot 7."},
 			{Text: "Which species is this?"},
 		}}},
-	})
+	}, nil)
+
 	if err != nil {
 		t.Fatalf("convertRequest: %v", err)
 	}
@@ -344,7 +350,7 @@ func TestConvertRequestDeferredToolsAndReferences(t *testing.T) {
 		},
 	}
 
-	params, _, err := m.convertRequest(req)
+	params, _, err := m.convertRequest(req, nil)
 	if err != nil {
 		t.Fatalf("convertRequest: %v", err)
 	}

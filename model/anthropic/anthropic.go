@@ -57,6 +57,10 @@ type anthropicModel struct {
 	promptCaching    *PromptCachingConfig
 
 	toolReferencesResponseKey string
+
+	// files resolves inline documents to Files API references; nil sends them
+	// inline.
+	files *filesResolver
 }
 
 // NewModel returns [model.LLM], backed by Anthropic Claude.
@@ -77,6 +81,10 @@ func NewModel(ctx context.Context, modelName anthropicsdk.Model, cfg *Config) (m
 	variant := cfg.Variant
 	if variant == "" {
 		variant = GetVariant()
+	}
+
+	if cfg.Files != nil && variant != VariantAnthropicAPI {
+		return nil, fmt.Errorf("Files requires the %s variant, not %s", VariantAnthropicAPI, variant)
 	}
 
 	var client anthropicsdk.Client
@@ -113,6 +121,19 @@ func NewModel(ctx context.Context, modelName anthropicsdk.Model, cfg *Config) (m
 		maxTokens = defaultMaxTokens
 	}
 
+	var files *filesResolver
+	if cfg.Files != nil {
+		apiKey := cfg.APIKey
+		if apiKey == "" {
+			apiKey = os.Getenv("ANTHROPIC_API_KEY")
+		}
+		var err error
+		files, err = newFilesResolver(*cfg.Files, &client, apiKey, cfg.BaseURL)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return &anthropicModel{
 		client:           client,
 		name:             modelName,
@@ -123,6 +144,7 @@ func NewModel(ctx context.Context, modelName anthropicsdk.Model, cfg *Config) (m
 		promptCaching:    cfg.PromptCaching,
 
 		toolReferencesResponseKey: cfg.ToolReferencesResponseKey,
+		files:                     files,
 	}, nil
 }
 
@@ -192,9 +214,27 @@ func (m *anthropicModel) GenerateContent(ctx context.Context, req *model.LLMRequ
 
 // generate calls the model synchronously.
 func (m *anthropicModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
-	params, toolKeyAliases, err := m.convertRequest(req)
+	for attempt := 0; ; attempt++ {
+		fileIDs, err := m.resolveFiles(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		resp, received, err := m.generateOnce(ctx, req, fileIDs)
+		if err != nil && attempt == 0 && m.shouldReuploadFiles(err, received, fileIDs) {
+			m.files.forget(fileIDs)
+			continue
+		}
+		return resp, err
+	}
+}
+
+// generateOnce is one attempt of generate with the given file references. It
+// also reports whether any stream event arrived, which shouldReuploadFiles
+// needs to tell a rejected request from a stream that failed partway.
+func (m *anthropicModel) generateOnce(ctx context.Context, req *model.LLMRequest, fileIDs map[*genai.Blob]string) (*model.LLMResponse, bool, error) {
+	params, toolKeyAliases, err := m.convertRequest(req, fileIDs)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrRequestConversion, err)
+		return nil, false, fmt.Errorf("%w: %w", ErrRequestConversion, err)
 	}
 
 	// Accumulate a streaming response rather than calling the non-streaming endpoint. The latter is
@@ -204,14 +244,16 @@ func (m *anthropicModel) generate(ctx context.Context, req *model.LLMRequest) (*
 	stream := m.client.Messages.NewStreaming(ctx, params)
 	message := anthropicsdk.Message{}
 	messageStartCallback, _ := MessageStartCallbackFromContext(ctx)
+	received := false
 	for stream.Next() {
+		received = true
 		event := stream.Current()
 		repairAccumulatedToolInput(&message, event)
 		if err := toolInputErrorAtStop(&message, event); err != nil {
-			return nil, fmt.Errorf("failed to accumulate message: %w", err)
+			return nil, received, fmt.Errorf("failed to accumulate message: %w", err)
 		}
 		if err := message.Accumulate(event); err != nil {
-			return nil, fmt.Errorf("failed to accumulate message: %w", err)
+			return nil, received, fmt.Errorf("failed to accumulate message: %w", err)
 		}
 		switch ev := event.AsAny().(type) {
 		case anthropicsdk.MessageStartEvent:
@@ -225,92 +267,139 @@ func (m *anthropicModel) generate(ctx context.Context, req *model.LLMRequest) (*
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return nil, fmt.Errorf("failed to call model: %w", err)
+		return nil, received, fmt.Errorf("failed to call model: %w", err)
 	}
 
 	resp, err := converters.MessageToLLMResponse(&message, toolKeyAliases)
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert response: %w", err)
+		return nil, received, fmt.Errorf("failed to convert response: %w", err)
 	}
 
 	// A non-streaming response is the whole turn, so mark it complete — matching
 	// the final response yielded by generateStream.
 	resp.TurnComplete = true
-	return resp, nil
+	return resp, received, nil
+}
+
+// resolveFiles returns the request's Files API references (see FilesConfig),
+// or nil when the model sends documents inline.
+func (m *anthropicModel) resolveFiles(ctx context.Context, req *model.LLMRequest) (map[*genai.Blob]string, error) {
+	if m.files == nil {
+		return nil, nil
+	}
+	return m.files.resolve(ctx, req)
+}
+
+// shouldReuploadFiles reports whether a failed attempt that referenced the
+// given files should be retried once with fresh uploads: the API rejected the
+// request outright (no stream event arrived) as referring to something that
+// does not exist, which a file deleted before its expiry causes. The retry
+// costs a re-upload when the rejection had another cause.
+func (m *anthropicModel) shouldReuploadFiles(err error, received bool, fileIDs map[*genai.Blob]string) bool {
+	return m.files != nil && len(fileIDs) > 0 && !received && isMissingFileError(err)
 }
 
 // generateStream returns a stream of responses from the model.
 func (m *anthropicModel) generateStream(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		params, toolKeyAliases, err := m.convertRequest(req)
-		if err != nil {
-			yield(nil, fmt.Errorf("%w: %w", ErrRequestConversion, err))
-			return
-		}
-
-		stream := m.client.Messages.NewStreaming(ctx, params)
-		message := anthropicsdk.Message{}
-		messageStartCallback, _ := MessageStartCallbackFromContext(ctx)
-
-		for stream.Next() {
-			event := stream.Current()
-
-			// Accumulate the message
-			repairAccumulatedToolInput(&message, event)
-			if err := toolInputErrorAtStop(&message, event); err != nil {
-				yield(nil, fmt.Errorf("failed to accumulate message: %w", err))
+		for attempt := 0; ; attempt++ {
+			fileIDs, err := m.resolveFiles(ctx, req)
+			if err != nil {
+				yield(nil, err)
 				return
 			}
-			if err := message.Accumulate(event); err != nil {
-				yield(nil, fmt.Errorf("failed to accumulate message: %w", err))
+			received, err := m.generateStreamOnce(ctx, req, fileIDs, yield)
+			if err == nil {
 				return
 			}
-
-			// Handle different event types for streaming
-			switch ev := event.AsAny().(type) {
-			case anthropicsdk.MessageStartEvent:
-				if messageStartCallback != nil {
-					messageStartCallback(MessageStartUsage{
-						InputTokens:              ev.Message.Usage.InputTokens,
-						CacheReadInputTokens:     ev.Message.Usage.CacheReadInputTokens,
-						CacheCreationInputTokens: ev.Message.Usage.CacheCreationInputTokens,
-					})
-				}
-			case anthropicsdk.ContentBlockDeltaEvent:
-				// Handle text deltas
-				switch delta := ev.Delta.AsAny().(type) {
-				case anthropicsdk.TextDelta:
-					resp := converters.StreamDeltaToPartialResponse(delta.Text)
-					if !yield(resp, nil) {
-						return
-					}
-				case anthropicsdk.ThinkingDelta:
-					resp := converters.StreamThinkingDeltaToPartialResponse(delta.Thinking)
-					if !yield(resp, nil) {
-						return
-					}
-				}
+			if attempt == 0 && m.shouldReuploadFiles(err, received, fileIDs) {
+				m.files.forget(fileIDs)
+				continue
 			}
-		}
-
-		if err := stream.Err(); err != nil {
-			yield(nil, fmt.Errorf("stream error: %w", err))
+			yield(nil, err)
 			return
 		}
-
-		// Yield the final complete response
-		finalResp, err := converters.MessageToLLMResponse(&message, toolKeyAliases)
-		if err != nil {
-			yield(nil, fmt.Errorf("failed to convert stream response: %w", err))
-			return
-		}
-		finalResp.TurnComplete = true
-		yield(finalResp, nil)
 	}
 }
 
-// convertRequest converts an LLMRequest to Anthropic MessageNewParams.
-func (m *anthropicModel) convertRequest(req *model.LLMRequest) (anthropicsdk.MessageNewParams, map[string]string, error) {
+// generateStreamOnce is one attempt of generateStream with the given file
+// references. It yields each partial response and the final one, and returns
+// rather than yields a failure, with whether any stream event arrived before
+// it, so the caller can retry a rejected request (see shouldReuploadFiles). A
+// consumer that stops early ends the attempt with no error.
+func (m *anthropicModel) generateStreamOnce(
+	ctx context.Context,
+	req *model.LLMRequest,
+	fileIDs map[*genai.Blob]string,
+	yield func(*model.LLMResponse, error) bool,
+) (bool, error) {
+	params, toolKeyAliases, err := m.convertRequest(req, fileIDs)
+	if err != nil {
+		return false, fmt.Errorf("%w: %w", ErrRequestConversion, err)
+	}
+
+	stream := m.client.Messages.NewStreaming(ctx, params)
+	message := anthropicsdk.Message{}
+	messageStartCallback, _ := MessageStartCallbackFromContext(ctx)
+	received := false
+
+	for stream.Next() {
+		received = true
+		event := stream.Current()
+
+		// Accumulate the message
+		repairAccumulatedToolInput(&message, event)
+		if err := toolInputErrorAtStop(&message, event); err != nil {
+			return received, fmt.Errorf("failed to accumulate message: %w", err)
+		}
+		if err := message.Accumulate(event); err != nil {
+			return received, fmt.Errorf("failed to accumulate message: %w", err)
+		}
+
+		// Handle different event types for streaming
+		switch ev := event.AsAny().(type) {
+		case anthropicsdk.MessageStartEvent:
+			if messageStartCallback != nil {
+				messageStartCallback(MessageStartUsage{
+					InputTokens:              ev.Message.Usage.InputTokens,
+					CacheReadInputTokens:     ev.Message.Usage.CacheReadInputTokens,
+					CacheCreationInputTokens: ev.Message.Usage.CacheCreationInputTokens,
+				})
+			}
+		case anthropicsdk.ContentBlockDeltaEvent:
+			// Handle text deltas
+			switch delta := ev.Delta.AsAny().(type) {
+			case anthropicsdk.TextDelta:
+				resp := converters.StreamDeltaToPartialResponse(delta.Text)
+				if !yield(resp, nil) {
+					return received, nil
+				}
+			case anthropicsdk.ThinkingDelta:
+				resp := converters.StreamThinkingDeltaToPartialResponse(delta.Thinking)
+				if !yield(resp, nil) {
+					return received, nil
+				}
+			}
+		}
+	}
+
+	if err := stream.Err(); err != nil {
+		return received, fmt.Errorf("stream error: %w", err)
+	}
+
+	// Yield the final complete response
+	finalResp, err := converters.MessageToLLMResponse(&message, toolKeyAliases)
+	if err != nil {
+		return received, fmt.Errorf("failed to convert stream response: %w", err)
+	}
+	finalResp.TurnComplete = true
+	yield(finalResp, nil)
+	return received, nil
+}
+
+// convertRequest converts an LLMRequest to Anthropic MessageNewParams, sending
+// each inline document with an entry in fileIDs as a reference to that file.
+func (m *anthropicModel) convertRequest(req *model.LLMRequest, fileIDs map[*genai.Blob]string) (anthropicsdk.MessageNewParams, map[string]string, error) {
 	// Tools convert first: the contents' tool references may name only the tools this request defers.
 	// toolKeyAliases maps aliased top-level tool property keys back to their original names; it is
 	// returned so the response parser can restore them.
@@ -327,6 +416,7 @@ func (m *anthropicModel) convertRequest(req *model.LLMRequest) (anthropicsdk.Mes
 		converters.ContentsOptions{
 			ToolReferencesResponseKey: m.toolReferencesResponseKey,
 			DeferredToolNames:         converters.DeferredToolNames(tools),
+			FileIDByBlob:              fileIDs,
 		},
 	)
 	if err != nil {

@@ -64,6 +64,13 @@ type ContentsOptions struct {
 	// references only for deferred ones.
 	DeferredToolNames map[string]struct{}
 
+	// FileIDByBlob maps inline PDF and image data to the Files API file
+	// holding the same bytes, which the converter references instead of
+	// sending the data as base64. Keyed by the blob itself, so only the
+	// caller, never the conversation's content, can name a file. Inline data
+	// without an entry is sent as base64.
+	FileIDByBlob map[*genai.Blob]string
+
 	// latestReferenceByToolName maps each tool name some function response
 	// lists under ToolReferencesResponseKey to the last such response in the
 	// contents, filled by ContentsToMessagesWithMarkedBlocks: a tool referenced
@@ -356,7 +363,7 @@ func partToContentBlocks(
 
 	// Inline binary data (images, PDFs)
 	if part.InlineData != nil {
-		return singleBlock(inlineDataToBlock(part.InlineData))
+		return singleBlock(inlineDataToBlock(part.InlineData, opts.FileIDByBlob[part.InlineData]))
 	}
 
 	// File data (URI-based)
@@ -391,8 +398,10 @@ func singleBlock(block *anthropic.ContentBlockParamUnion, err error) ([]anthropi
 	return []anthropic.ContentBlockParamUnion{*block}, nil
 }
 
-// inlineDataToBlock converts inline binary data to an Anthropic content block.
-func inlineDataToBlock(blob *genai.Blob) (*anthropic.ContentBlockParamUnion, error) {
+// inlineDataToBlock converts inline binary data to an Anthropic content block:
+// a reference to the given file when fileID is non-empty, otherwise the data
+// as base64.
+func inlineDataToBlock(blob *genai.Blob, fileID string) (*anthropic.ContentBlockParamUnion, error) {
 	if blob == nil {
 		return nil, nil
 	}
@@ -404,6 +413,10 @@ func inlineDataToBlock(blob *genai.Blob) (*anthropic.ContentBlockParamUnion, err
 		mediaType, err := mapImageMediaType(mimeType)
 		if err != nil {
 			return nil, err
+		}
+		if fileID != "" {
+			block := anthropic.NewImageBlock(anthropic.FileImageSourceParam{FileID: fileID})
+			return &block, nil
 		}
 		block := anthropic.ContentBlockParamUnion{
 			OfImage: &anthropic.ImageBlockParam{
@@ -420,6 +433,10 @@ func inlineDataToBlock(blob *genai.Blob) (*anthropic.ContentBlockParamUnion, err
 
 	// Handle PDFs (beta feature)
 	if mimeType == "application/pdf" {
+		if fileID != "" {
+			block := anthropic.NewDocumentBlock(anthropic.FileDocumentSourceParam{FileID: fileID})
+			return &block, nil
+		}
 		block := anthropic.ContentBlockParamUnion{
 			OfDocument: &anthropic.DocumentBlockParam{
 				Source: anthropic.DocumentBlockParamSourceUnion{

@@ -219,4 +219,9 @@ type Config struct {
 	// (adaptive vs. a manual budget_tokens form), matching what the chosen Claude
 	// model supports. The zero value is ThinkingModeAdaptive.
 	ThinkingMode ThinkingMode
+
+	// Files, when set, sends the request's inline PDFs and images as Files API
+	// references rather than base64 (see FilesConfig). Only valid with
+	// VariantAnthropicAPI. Nil (the default) sends every document inline.
+	Files *FilesConfig
 }
