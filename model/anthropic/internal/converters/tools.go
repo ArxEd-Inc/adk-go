@@ -86,13 +86,16 @@ func IsDeferredTool(tool anthropic.ToolUnionParam) bool {
 
 // FunctionDeclarationToTool converts a genai FunctionDeclaration to an Anthropic ToolUnionParam,
 // recording any top-level property-key aliases it creates into aliases (alias -> original name).
-// A documented response schema is appended to the tool description (see functionDescription).
+// A documented response schema is appended to the tool description (see functionDescription), and
+// a parameter schema's root "examples" become the tool's input_examples (see functionInputSchema).
 func FunctionDeclarationToTool(fd *genai.FunctionDeclaration, aliases map[string]string) anthropic.ToolUnionParam {
+	inputSchema, inputExamples := functionInputSchema(fd, aliases)
 	return anthropic.ToolUnionParam{
 		OfTool: &anthropic.ToolParam{
-			Name:        fd.Name,
-			Description: anthropic.String(functionDescription(fd)),
-			InputSchema: functionInputSchema(fd, aliases),
+			Name:          fd.Name,
+			Description:   anthropic.String(functionDescription(fd)),
+			InputSchema:   inputSchema,
+			InputExamples: inputExamples,
 		},
 	}
 }
@@ -218,10 +221,18 @@ func schemaIsDocumented(schema any) bool {
 // input_schema.type to be "object", which a bare $ref isn't). properties and required are surfaced
 // as the SDK's typed fields; any remaining top-level keywords (notably $defs) pass through
 // ExtraFields, which the SDK merges into the marshalled input_schema.
-func functionInputSchema(fd *genai.FunctionDeclaration, aliases map[string]string) anthropic.ToolInputSchemaParam {
+//
+// A root "examples" list holds example argument objects. The Messages API gives example tool
+// inputs their own field, input_examples, which it presents alongside the schema and validates
+// against it, so such a list is returned for that field and left out of input_schema (see
+// inputExamplesFromSchema). A list holding anything but objects stays in input_schema as written.
+func functionInputSchema(
+	fd *genai.FunctionDeclaration,
+	aliases map[string]string,
+) (anthropic.ToolInputSchemaParam, []map[string]any) {
 	schema := functionSchemaMap(fd)
 	if schema == nil {
-		return anthropic.ToolInputSchemaParam{Properties: map[string]any{}}
+		return anthropic.ToolInputSchemaParam{Properties: map[string]any{}}, nil
 	}
 
 	if ref, ok := schema["$ref"].(string); ok {
@@ -233,6 +244,11 @@ func functionInputSchema(fd *genai.FunctionDeclaration, aliases map[string]strin
 				}
 			}
 		}
+	}
+
+	inputExamples := inputExamplesFromSchema(schema)
+	if inputExamples != nil {
+		delete(schema, "examples")
 	}
 
 	// Anthropic validates top-level property keys against ^[a-zA-Z0-9_.-]{1,64}$ (but not $defs keys
@@ -270,7 +286,31 @@ func functionInputSchema(fd *genai.FunctionDeclaration, aliases map[string]strin
 	}
 	input.ExtraFields = extraFields
 
-	return input
+	return input, inputExamples
+}
+
+// inputExamplesFromSchema returns a parameter schema's root "examples" as input_examples, each
+// example object's top-level keys passed through aliasToolKey as the schema's property keys are, so
+// the examples still validate against the aliased input_schema. It returns nil when the schema has
+// no examples or when any example is not a JSON object.
+func inputExamplesFromSchema(schema map[string]any) []map[string]any {
+	examples, ok := schema["examples"].([]any)
+	if !ok || len(examples) == 0 {
+		return nil
+	}
+	inputExamples := make([]map[string]any, 0, len(examples))
+	for _, example := range examples {
+		exampleObject, ok := example.(map[string]any)
+		if !ok {
+			return nil
+		}
+		aliasedExample := make(map[string]any, len(exampleObject))
+		for key, value := range exampleObject {
+			aliasedExample[aliasToolKey(key)] = value
+		}
+		inputExamples = append(inputExamples, aliasedExample)
+	}
+	return inputExamples
 }
 
 // functionSchemaMap returns the FunctionDeclaration's parameter schema as a JSON Schema map. It

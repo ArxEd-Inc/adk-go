@@ -384,6 +384,87 @@ func searchBooksResponseSchema() map[string]any {
 	}
 }
 
+// TestFunctionDeclarationToToolSendsRootExamplesAsInputExamples verifies that a parameter schema's
+// root "examples" are sent as the tool's input_examples and left out of input_schema, with each
+// example's top-level keys aliased exactly as the schema's property keys are.
+func TestFunctionDeclarationToToolSendsRootExamplesAsInputExamples(t *testing.T) {
+	longKey := strings.Repeat("note_", 14) // 70 valid chars, over the 64-char limit
+	fd := &genai.FunctionDeclaration{
+		Name: "placeOrder",
+		ParametersJsonSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"sku":      map[string]any{"type": "string"},
+				"quantity": map[string]any{"type": "integer"},
+				longKey:    map[string]any{"type": "string"},
+			},
+			"required": []any{"sku"},
+			"examples": []any{
+				map[string]any{"sku": "A-100", "quantity": 2, longKey: "gift wrap"},
+				map[string]any{"sku": "B-200"},
+			},
+		},
+	}
+
+	aliases := map[string]string{}
+	tool := FunctionDeclarationToTool(fd, aliases)
+	if _, inSchema := tool.OfTool.InputSchema.ExtraFields["examples"]; inSchema {
+		t.Error("input_schema still carries the examples sent as input_examples")
+	}
+	examples := tool.OfTool.InputExamples
+	if len(examples) != 2 {
+		t.Fatalf("input_examples = %v, want the schema's two examples", examples)
+	}
+	if examples[0]["sku"] != "A-100" || examples[0]["quantity"] != float64(2) || examples[1]["sku"] != "B-200" {
+		t.Errorf("input_examples = %v, want the examples in order with their values", examples)
+	}
+	var alias string
+	for aliasKey, original := range aliases {
+		if original == longKey {
+			alias = aliasKey
+		}
+	}
+	if alias == "" {
+		t.Fatalf("no alias recorded for %q", longKey)
+	}
+	if _, sentVerbatim := examples[0][longKey]; sentVerbatim {
+		t.Errorf("example key %q sent verbatim; the schema's property is aliased to %q", longKey, alias)
+	}
+	if examples[0][alias] != "gift wrap" {
+		t.Errorf("example value under alias %q = %v, want %q", alias, examples[0][alias], "gift wrap")
+	}
+
+	toolJSON, err := json.Marshal(tool)
+	if err != nil {
+		t.Fatalf("json.Marshal(tool): %v", err)
+	}
+	if !strings.Contains(string(toolJSON), `"input_examples":[`) {
+		t.Errorf("marshaled tool has no input_examples: %s", toolJSON)
+	}
+}
+
+// TestFunctionDeclarationToToolKeepsNonObjectExamplesInSchema verifies that a root "examples"
+// list holding anything but objects is not sent as input_examples, which must be objects, and
+// stays in input_schema as written.
+func TestFunctionDeclarationToToolKeepsNonObjectExamplesInSchema(t *testing.T) {
+	fd := &genai.FunctionDeclaration{
+		Name: "placeOrder",
+		ParametersJsonSchema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"sku": map[string]any{"type": "string"}},
+			"examples":   []any{map[string]any{"sku": "A-100"}, "not an object"},
+		},
+	}
+
+	tool := FunctionDeclarationToTool(fd, map[string]string{})
+	if tool.OfTool.InputExamples != nil {
+		t.Errorf("input_examples = %v, want none", tool.OfTool.InputExamples)
+	}
+	if _, inSchema := tool.OfTool.InputSchema.ExtraFields["examples"]; !inSchema {
+		t.Error("input_schema lost an examples list that could not become input_examples")
+	}
+}
+
 // TestFunctionDeclarationToToolAppendsDocumentedResponseSchema verifies that a documented
 // response schema, which the Messages API's tool definition has no field for, reaches the model
 // appended to the tool description as compact JSON with sorted keys, after a blank line and a
