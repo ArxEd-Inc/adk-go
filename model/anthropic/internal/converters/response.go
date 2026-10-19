@@ -302,7 +302,7 @@ func textCitationsToSlice(citations []anthropic.TextCitationUnion) []*genai.Cita
 //
 // Anthropic reports input_tokens as non-cached tokens only, with cache tokens
 // as separate additive fields. The OTEL GenAI convention expects input_tokens
-// to be the total (cached + uncached), with cached as a subset. We normalise
+// to be the total (cached + uncached), with cached as a subset. We normalize
 // here so that downstream cost calculations work correctly.
 func UsageToMetadata(usage anthropic.Usage) *genai.GenerateContentResponseUsageMetadata {
 	totalInput := usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens

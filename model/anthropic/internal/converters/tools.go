@@ -220,7 +220,7 @@ func schemaIsDocumented(schema any) bool {
 // and inlines a root $ref against $defs so the top level is a concrete object (Anthropic requires
 // input_schema.type to be "object", which a bare $ref isn't). properties and required are surfaced
 // as the SDK's typed fields; any remaining top-level keywords (notably $defs) pass through
-// ExtraFields, which the SDK merges into the marshalled input_schema.
+// ExtraFields, which the SDK merges into the marshaled input_schema.
 //
 // A root "examples" list holds example argument objects. The Messages API gives example tool
 // inputs their own field, input_examples, which it presents alongside the schema and validates

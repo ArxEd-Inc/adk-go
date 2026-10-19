@@ -1145,7 +1145,7 @@ func TestPriorSummaryIsNotTruncatedByToolContentCap(t *testing.T) {
 	}
 
 	// The cap must still bite on content the framework did not author, or this
-	// would be a licence for any large text part to inflate the prompt.
+	// would be a license for any large text part to inflate the prompt.
 	toolPrompt := promptFor(t,
 		LLMSummarizerConfig{
 			Model:               &fakeModel{responses: []*model.LLMResponse{summaryResponse("done")}},
