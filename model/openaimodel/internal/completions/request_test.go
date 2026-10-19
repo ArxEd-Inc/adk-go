@@ -399,7 +399,7 @@ func TestBuildParams_CallOutsideModelTurnRejected(t *testing.T) {
 }
 
 // TestApplyGenerationConfig_EndpointOnlyFields covers the three settings
-// Chat Completions honours that the Responses path rejects outright.
+// Chat Completions honors that the Responses path rejects outright.
 func TestApplyGenerationConfig_EndpointOnlyFields(t *testing.T) {
 	seed := int32(42)
 	freq := float32(0.5)
@@ -479,6 +479,7 @@ func TestApplyGenerationConfig_RejectedFields(t *testing.T) {
 		{name: "mime type", cfg: &genai.GenerateContentConfig{ResponseMIMEType: "text/csv"}, want: shared.ErrUnsupportedMIMEType},
 		{name: "cached content", cfg: &genai.GenerateContentConfig{CachedContent: "c"}, want: shared.ErrUnsupportedConfigField},
 		{name: "speech config", cfg: &genai.GenerateContentConfig{SpeechConfig: &genai.SpeechConfig{}}, want: shared.ErrUnsupportedConfigField},
+		{name: "continuation token", cfg: &genai.GenerateContentConfig{ContinuationToken: []byte("token")}, want: shared.ErrUnsupportedConfigField},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

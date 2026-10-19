@@ -586,53 +586,6 @@ func TestContentsRequestProcessor(t *testing.T) {
 			},
 		},
 		{
-			// A foreign event with a thought part keeps the visible text but drops the thought,
-			// verified through the full ContentsRequestProcessor path.
-			name: "anotherAgentEventWithThought",
-			events: []*session.Event{
-				{
-					Author: "anotherAgent",
-					LLMResponse: model.LLMResponse{
-						Content: &genai.Content{
-							Role: "model",
-							Parts: []*genai.Part{
-								{Thought: true, ThoughtSignature: []byte("sig"), Text: "private reasoning"},
-								{Text: "Foreign message"},
-							},
-						},
-					},
-				},
-			},
-			want: []*genai.Content{
-				{
-					Role: "user",
-					Parts: []*genai.Part{
-						{Text: "For context:"},
-						{Text: "[anotherAgent] said: Foreign message"},
-					},
-				},
-			},
-		},
-		{
-			// A thought-only foreign turn is dropped entirely: ConvertForeignEvent returns nil and the
-			// caller's nil guard keeps it out of the contents, so no content is produced.
-			name: "anotherAgentEventThoughtOnly",
-			events: []*session.Event{
-				{
-					Author: "anotherAgent",
-					LLMResponse: model.LLMResponse{
-						Content: &genai.Content{
-							Role: "model",
-							Parts: []*genai.Part{
-								{Thought: true, ThoughtSignature: []byte("sig"), Text: "private reasoning"},
-							},
-						},
-					},
-				},
-			},
-			want: nil,
-		},
-		{
 			name: "ExcludeToolConfirmation",
 			events: []*session.Event{
 				{
@@ -965,9 +918,10 @@ func TestConvertForeignEvent(t *testing.T) {
 			},
 		},
 		{
-			// A foreign agent's empty-text signed thought (as emitted by thinking-capable models)
-			// is dropped, leaving only the header, so the whole event is dropped.
-			name: "EmptyTextSignedThought",
+			// A thought part (with text) must be excluded so another agent's
+			// private reasoning never leaks into the current agent's context;
+			// the non-thought text is still presented.
+			name: "ThoughtWithTextExcluded",
 			event: &session.Event{
 				Timestamp: now,
 				Author:    "foreign",
@@ -975,46 +929,8 @@ func TestConvertForeignEvent(t *testing.T) {
 					Content: &genai.Content{
 						Role: "model",
 						Parts: []*genai.Part{
-							{Thought: true, ThoughtSignature: []byte("sig"), Text: ""},
-						},
-					},
-				},
-				Branch: "b",
-			},
-			want: nil,
-		},
-		{
-			// A thought with text is dropped (not re-emitted as "said:"), so a thought-only turn
-			// leaves only the header and the event is dropped.
-			name: "NonEmptyTextThought",
-			event: &session.Event{
-				Timestamp: now,
-				Author:    "foreign",
-				LLMResponse: model.LLMResponse{
-					Content: &genai.Content{
-						Role: "model",
-						Parts: []*genai.Part{
-							{Thought: true, ThoughtSignature: []byte("sig"), Text: "secret reasoning"},
-						},
-					},
-				},
-				Branch: "b",
-			},
-			want: nil,
-		},
-		{
-			// The thought is dropped while the visible answer is kept, so the event survives with
-			// the header and the answer's "said:" stub only.
-			name: "ThoughtAndText",
-			event: &session.Event{
-				Timestamp: now,
-				Author:    "foreign",
-				LLMResponse: model.LLMResponse{
-					Content: &genai.Content{
-						Role: "model",
-						Parts: []*genai.Part{
-							{Thought: true, ThoughtSignature: []byte("sig"), Text: "secret reasoning"},
-							{Text: "the visible answer"},
+							{Text: "secret reasoning", Thought: true},
+							{Text: "the answer"},
 						},
 					},
 				},
@@ -1028,7 +944,7 @@ func TestConvertForeignEvent(t *testing.T) {
 						Role: "user",
 						Parts: []*genai.Part{
 							{Text: "For context:"},
-							{Text: "[foreign] said: the visible answer"},
+							{Text: "[foreign] said: the answer"},
 						},
 					},
 				},
@@ -1036,9 +952,9 @@ func TestConvertForeignEvent(t *testing.T) {
 			},
 		},
 		{
-			// A function call marked thought=True (e.g. by Gemini 3 Flash) is dropped because the
-			// thought case is checked first, matching adk-python's _present_other_agent_message.
-			name: "FunctionCallMarkedThought",
+			// An empty-text thought part previously fell through to the default
+			// branch and was copied verbatim; it must now be dropped too.
+			name: "EmptyTextThoughtExcluded",
 			event: &session.Event{
 				Timestamp: now,
 				Author:    "foreign",
@@ -1046,10 +962,61 @@ func TestConvertForeignEvent(t *testing.T) {
 					Content: &genai.Content{
 						Role: "model",
 						Parts: []*genai.Part{
-							{FunctionCall: &genai.FunctionCall{Name: "x"}, Thought: true},
+							{Thought: true},
+							{Text: "the answer"},
 						},
 					},
 				},
+				Branch: "b",
+			},
+			want: &session.Event{
+				Timestamp: now,
+				Author:    "user",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: "user",
+						Parts: []*genai.Part{
+							{Text: "For context:"},
+							{Text: "[foreign] said: the answer"},
+						},
+					},
+				},
+				Branch: "b",
+			},
+		},
+		{
+			// A foreign turn made up entirely of thoughts leaves only the
+			// "For context:" header, so the event is dropped (nil) rather than
+			// emitting a bare header.
+			name: "ThoughtOnlyDropped",
+			event: &session.Event{
+				Timestamp: now,
+				Author:    "foreign",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: "model",
+						Parts: []*genai.Part{
+							{Text: "only reasoning", Thought: true},
+						},
+					},
+				},
+				Branch: "b",
+			},
+			want: nil,
+		},
+		{
+			// Retain the two-thought regression from nuthalapativarun's #1104.
+			name: "MultipleThoughtsOnlyDropped",
+			event: &session.Event{
+				Timestamp: now,
+				Author:    "foreign",
+				LLMResponse: model.LLMResponse{Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{Text: "internal reasoning", Thought: true},
+						{Text: "more thoughts", Thought: true},
+					},
+				}},
 				Branch: "b",
 			},
 			want: nil,
@@ -1059,8 +1026,8 @@ func TestConvertForeignEvent(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := llminternal.ConvertForeignEvent(tc.event)
-			if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(genai.FunctionCall{}, genai.FunctionResponse{})); diff != "" {
-				t.Errorf("convertForeignEvent() mismatch (-want +got):\n%s", diff)
+			if !cmp.Equal(tc.want, got, cmp.AllowUnexported(genai.FunctionCall{}, genai.FunctionResponse{})) {
+				t.Error("converted event does not match the expected public content and metadata")
 			}
 		})
 	}

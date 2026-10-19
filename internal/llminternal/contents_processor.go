@@ -60,12 +60,12 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		// adk-python, where _llm_agent_wrapper.py gates the same override on
 		// include_contents being absent from model_fields_set.
 		//
-		// How to shape the turn also honours the declaration, since the
+		// How to shape the turn also honors the declaration, since the
 		// single-turn nudge describes the agent rather than its placement.
 		boundMode, bound := BoundMode(ctx, name, state)
 		// Only "default" opts out of the placement. Testing for "" instead
-		// would let any unrecognised value opt out too, and IncludeContents is
-		// an unvalidated string, so a typo — "None", "defualt" — would hand a
+		// would let any unrecognized value opt out too, and IncludeContents is
+		// an unvalidated string, so a typo — "None", "defualt" //nolint:misspell — would hand a
 		// one-shot node the whole transcript. The merge base forced "none" here
 		// and so could not be misconfigured this way.
 		placementHidesHistory := bound && boundMode == ModeSingleTurn &&
@@ -79,10 +79,10 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		// A compaction record instructs prompt assembly to drop a span of
 		// history and substitute content in its place. EventActions is
 		// writable by tool code, and the REST create-session body maps it
-		// verbatim onto the stored event, so honouring any record found in a
+		// verbatim onto the stored event, so honoring any record found in a
 		// session would be an erase-and-inject primitive that works even for an
 		// application that never enabled compaction. Records are therefore only
-		// honoured when this run actually has compaction configured.
+		// honored when this run actually has compaction configured.
 		compactionEnabled := compactionctx.FromContext(ctx).Configured()
 
 		var events []*session.Event
@@ -153,6 +153,8 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 			continue
 		}
 		if isOtherAgentReply(agentName, ev) && !compactioninternal.HasUsableSummary(ev) {
+			// ConvertForeignEvent returns nil to signal the foreign event
+			// should be dropped (e.g. a thought-only turn).
 			if converted := ConvertForeignEvent(ev); converted != nil {
 				filtered = append(filtered, converted)
 			}
@@ -331,7 +333,7 @@ func dropOrphanedFunctionResponses(events, allEvents []*session.Event) ([]*sessi
 	}
 
 	if len(orphanedIDs) > 0 {
-		log.Printf("adk: dropping function responses with no matching function call: %q", orphanedIDs)
+		log.Printf("adk: dropping function responses with no matching function call: %q", orphanedIDs) //nolint:forbidigo // pre-slog call site
 	}
 	return result, orphanRemnants
 }
@@ -394,7 +396,7 @@ func dropOrphanedFunctionCalls(events []*session.Event) []*session.Event {
 	}
 
 	if len(orphanedIDs) > 0 {
-		log.Printf("adk: dropping function calls with no matching function response: %q", orphanedIDs)
+		log.Printf("adk: dropping function calls with no matching function response: %q", orphanedIDs) //nolint:forbidigo // pre-slog call site
 	}
 	return result
 }
@@ -770,6 +772,11 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 		if event.IsolationScope != isolationScope {
 			continue
 		}
+		// An event discarded by foreign conversion cannot start a visible
+		// turn: keep searching so it does not slice out the preceding input.
+		if isOtherAgentReply(agentName, event) && !compactioninternal.HasUsableSummary(event) && ConvertForeignEvent(event) == nil {
+			continue
+		}
 		if event.Author == "user" || isOtherAgentReply(agentName, event) {
 			return buildContentsDefaultWithCallSource(agentName, branch, isolationScope, events[i:], events, isSingleTurn, userContent)
 		}
@@ -785,11 +792,10 @@ func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
 
 // ConvertForeignEvent converts an event authored by another agent as
 // a user-content event.
-// This is to provide another aget's output as context to the current agent,
+// This is to provide another agent's output as context to the current agent,
 // so that the current agent can continue to respond, such as summarizing
 // the previous agent's reply, etc.
-// It returns nil when no presentable content remains after excluding the
-// other agent's thoughts (e.g. a thought-only foreign turn).
+// Thought parts are omitted; a non-empty event containing only thoughts returns nil.
 func ConvertForeignEvent(ev *session.Event) *session.Event {
 	content := utils.Content(ev)
 	if content == nil || len(content.Parts) == 0 {
@@ -801,13 +807,13 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 		Parts: []*genai.Part{{Text: "For context:"}},
 	}
 	for _, p := range content.Parts {
+		// Never replay another agent's private reasoning into the current
+		// agent's context. Matches adk-python's _present_other_agent_message,
+		// which drops thought parts as the first step of its per-part loop.
+		if p.Thought {
+			continue
+		}
 		switch {
-		case p.Thought:
-			// Exclude another agent's thoughts from the context: a foreign agent's private reasoning must
-			// not be replayed into the current agent's turn. Mirrors adk-python's _present_other_agent_message,
-			// which checks `if part.thought` first; placing it first here also drops function-call/response
-			// parts that some models (e.g. Gemini 3 Flash) mark thought=True, matching Python. The case body
-			// is intentionally empty: Go switch cases don't fall through, so the part is simply skipped.
 		case p.Text != "":
 			converted.Parts = append(converted.Parts, &genai.Part{
 				Text: fmt.Sprintf("[%s] said: %s", ev.Author, p.Text),
@@ -825,9 +831,9 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 		}
 	}
 
-	// Mirror adk-python: when every part was dropped (e.g. a thought-only foreign turn) and only the
-	// "For context:" header remains, there is nothing to present, so drop the event rather than emit a
-	// bare header.
+	// If only the "For context:" header remains (e.g. a thought-only foreign
+	// turn), drop the event entirely rather than emitting a bare header, as
+	// adk-python's _present_other_agent_message returns None in this case.
 	if len(converted.Parts) == 1 {
 		return nil
 	}
