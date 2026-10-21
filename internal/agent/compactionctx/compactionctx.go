@@ -65,12 +65,15 @@ type Runtime struct {
 
 // gateState is one agent's progress within an invocation.
 type gateState struct {
-	// lastCompactionTokens is the prompt size of the most recent compaction
-	// that has not yet been shown to work, or 0 when there is none.
+	// lastCompactionTokens is the baseline for the most recent compaction
+	// that has not yet been shown to work, or 0 when there is none: the prompt
+	// size it was recorded at, lowered by any smaller reading since.
 	lastCompactionTokens int64
 	// failures counts attempts that produced nothing storable. Distinct from a
-	// successful compaction because Recovered can reopen that one and cannot
-	// reopen this: the prompt never dropped, so nothing will report recovery.
+	// successful compaction because Recovered and growth can reopen that one
+	// and neither reopens this: the prompt never dropped, so nothing will
+	// report recovery, and a summarizer that keeps failing has no reason to
+	// succeed on a longer transcript.
 	//
 	// A few are allowed rather than one. Retrying without limit made a
 	// persistently failing summarizer cost a model call before every model call
@@ -84,6 +87,15 @@ type gateState struct {
 // maxFailuresPerInvocation is how many unproductive attempts one agent makes in
 // one invocation before giving up on compacting it.
 const maxFailuresPerInvocation = 3
+
+// reArmFraction sets how far a prompt still over the threshold after a
+// compaction must grow before another is attempted in the same invocation: by
+// TokenThreshold/reArmFraction. Smaller spends summarizer calls on a turn that
+// is only creeping; larger lets the prompt run further past the threshold
+// before it is caught. At an eighth, a turn whose prompt compacting cannot
+// bring down at all makes at most eight more attempts before the prompt reaches
+// twice the threshold.
+const reArmFraction = 8
 
 // Gate is a Runtime's progress gate scoped to one agent.
 //
@@ -127,23 +139,59 @@ func (g *Gate) state() *gateState {
 }
 
 // AllowAt reports whether another compaction is worth attempting for this agent
-// in this invocation.
+// in this invocation, with its prompt now at tokens.
 //
-// Deliberately not a function of prompt size. The caller has already found the
-// prompt over the threshold by the time it asks, and calls Recovered the moment
-// it drops back under, so the only question left here is whether the previous
-// attempt in this turn achieved anything.
-func (g *Gate) AllowAt() bool {
+// The caller has already found the prompt over the threshold by the time it
+// asks, and calls Recovered the moment it drops back under, so what is left is
+// whether a compaction earlier in this turn, which has not brought the prompt
+// under, leaves anything worth another attempt. Straight afterwards it does
+// not: the window past the retained tail is empty or nearly so, and another
+// pass would summarize a little more and leave the prompt as far over. But the
+// turn keeps growing, and every event that scrolls out of the retained tail as
+// it does is compactable. Waiting for a recovery that only another compaction
+// could bring shut compaction off for the rest of the turn, and the prompt
+// grew unchecked to the model's context limit.
+//
+// So the gate reopens once the prompt has grown by TokenThreshold/reArmFraction
+// since that compaction. That bounds the extra summarizer calls by growth, and
+// it measures growth with the observed prompt count, which sees the tool
+// declarations and documents that a window estimate cannot. The growth is
+// measured from the lowest reading since the compaction rather than from the
+// compaction itself, because RecordAt stores the prompt as it was before the
+// pass: a pass that took the prompt from 12,000 to 9,000 against an 8,000
+// threshold would otherwise reopen only at 13,000, not 10,000.
+func (g *Gate) AllowAt(tokens int) bool {
 	if g == nil || g.rt == nil {
 		return false
 	}
 	g.rt.mu.Lock()
 	defer g.rt.mu.Unlock()
 	st := g.state()
-	return st.lastCompactionTokens == 0 && st.failures < maxFailuresPerInvocation
+	if st.lastCompactionTokens != 0 {
+		// Kept non-zero for the reason RecordAt gives.
+		st.lastCompactionTokens = min(st.lastCompactionTokens, max(int64(tokens), 1))
+	}
+	if st.failures >= maxFailuresPerInvocation {
+		return false
+	}
+	if st.lastCompactionTokens == 0 {
+		return true
+	}
+	reArm := g.rt.reArmGrowth()
+	return reArm > 0 && int64(tokens)-st.lastCompactionTokens >= reArm
 }
 
-// RecordAt notes that a compaction was stored at this prompt size.
+// reArmGrowth is how far a prompt left over the threshold by a compaction has
+// to grow before AllowAt allows another, or 0 when it never does.
+func (rt *Runtime) reArmGrowth() int64 {
+	if rt.config == nil {
+		return 0
+	}
+	return int64(rt.config.TokenThreshold) / reArmFraction
+}
+
+// RecordAt notes that a compaction was stored at this prompt size, which
+// becomes the baseline AllowAt measures further growth from.
 func (g *Gate) RecordAt(tokens int) {
 	if g == nil || g.rt == nil {
 		return
@@ -151,7 +199,8 @@ func (g *Gate) RecordAt(tokens int) {
 	g.rt.mu.Lock()
 	defer g.rt.mu.Unlock()
 	// A compaction at a zero count would read as "nothing recorded yet", so the
-	// marker is kept non-zero. Only whether it is set is consulted.
+	// marker is kept non-zero. A baseline one token high is immaterial against
+	// the growth AllowAt waits for.
 	g.state().lastCompactionTokens = max(int64(tokens), 1)
 }
 

@@ -85,38 +85,75 @@ func TestProgressGateReArmsOnceThePromptRecovers(t *testing.T) {
 
 	rt := New(&compaction.Config{TokenThreshold: 1000, EventRetentionSize: 2}, nil)
 
-	if !rt.GateFor("a", "", "").AllowAt() {
-		t.Fatal("AllowAt() = false before any compaction, want true")
+	if !rt.GateFor("a", "", "").AllowAt(2000) {
+		t.Fatal("AllowAt(2000) = false before any compaction, want true")
 	}
 	rt.GateFor("a", "", "").RecordAt(2000)
 
 	// Still above the threshold, so the compaction has not been shown to work
 	// and another one would summarize a little more to no effect.
-	if rt.GateFor("a", "", "").AllowAt() {
-		t.Error("AllowAt() = true straight after a compaction, want false")
+	if rt.GateFor("a", "", "").AllowAt(2000) {
+		t.Error("AllowAt(2000) = true straight after a compaction, want false")
 	}
 
 	// The prompt came back under the threshold, so the compaction did work.
 	rt.GateFor("a", "", "").Recovered()
-	if !rt.GateFor("a", "", "").AllowAt() {
-		t.Error("AllowAt() = false after the prompt recovered, want true: a turn that grows again must be able to compact again")
+	if !rt.GateFor("a", "", "").AllowAt(2000) {
+		t.Error("AllowAt(2000) = false after the prompt recovered, want true: a turn that grows again must be able to compact again")
 	}
 }
 
-// TestProgressGateStaysClosedWhileCompactionCannotHelp pins the case the gate
-// exists for: a retained tail that already exceeds the threshold, where the
-// prompt never recovers and every further compaction is a wasted model call.
-func TestProgressGateStaysClosedWhileCompactionCannotHelp(t *testing.T) {
+// TestProgressGateReopensOnlyOnceThePromptHasGrown pins the gate's answer for a
+// prompt still over the threshold after a compaction.
+//
+// Straight after the pass, another is a wasted model call: the retained tail
+// already exceeds the threshold, the window past it is empty or nearly so, and
+// the prompt would stay as far over. But a turn that keeps growing scrolls
+// events out of the retained tail, and a gate that stayed closed until the
+// prompt recovered never reopened, because only a compaction could bring that
+// recovery: the prompt grew unchecked to the model's context limit. So it
+// reopens once the prompt has grown by TokenThreshold/reArmFraction, measured
+// from the lowest reading since the pass.
+func TestProgressGateReopensOnlyOnceThePromptHasGrown(t *testing.T) {
 	t.Parallel()
 
-	rt := New(&compaction.Config{TokenThreshold: 1000, EventRetentionSize: 2}, nil)
-	rt.GateFor("a", "", "").RecordAt(5000)
+	const threshold = 8000
+	const reArm = threshold / reArmFraction
+	cfg := &compaction.Config{TokenThreshold: threshold, EventRetentionSize: 2}
 
-	for _, tokens := range []int{4900, 5200, 12000} {
-		if rt.GateFor("a", "", "").AllowAt() {
-			t.Errorf("AllowAt() = true at %d tokens, want false while the prompt has never come back under the threshold", tokens)
+	t.Run("closed until the prompt grows by the re-arm amount", func(t *testing.T) {
+		t.Parallel()
+
+		g := New(cfg, nil).GateFor("a", "", "")
+		g.RecordAt(12000)
+		for _, tokens := range []int{12000, 12000 + reArm - 1} {
+			if g.AllowAt(tokens) {
+				t.Errorf("AllowAt(%d) = true after a compaction at 12000, want false until the prompt has grown by %d", tokens, reArm)
+			}
 		}
-	}
+		if !g.AllowAt(12000 + reArm) {
+			t.Errorf("AllowAt(%d) = false, want true: the prompt has grown by %d since the compaction", 12000+reArm, reArm)
+		}
+	})
+
+	t.Run("growth is measured from the lowest reading", func(t *testing.T) {
+		t.Parallel()
+
+		// RecordAt stores the prompt as it was before the pass. A pass that
+		// took it from 12,000 to 9,000 has left 9,000 to grow from, and
+		// measuring from 12,000 would let it run to 13,000 first.
+		g := New(cfg, nil).GateFor("a", "", "")
+		g.RecordAt(12000)
+		if g.AllowAt(9000) {
+			t.Fatal("AllowAt(9000) = true straight after the compaction, want false")
+		}
+		if g.AllowAt(9000 + reArm - 1) {
+			t.Errorf("AllowAt(%d) = true, want false: that is one token short of %d growth from 9000", 9000+reArm-1, reArm)
+		}
+		if !g.AllowAt(9000 + reArm) {
+			t.Errorf("AllowAt(%d) = false, want true: the prompt has grown by %d since its lowest reading, 9000", 9000+reArm, reArm)
+		}
+	})
 }
 
 // TestProgressGateRecordAtKeepsAZeroCountDistinct pins that a compaction
@@ -127,8 +164,31 @@ func TestProgressGateRecordAtKeepsAZeroCountDistinct(t *testing.T) {
 
 	rt := New(&compaction.Config{TokenThreshold: 1000, EventRetentionSize: 2}, nil)
 	rt.GateFor("a", "", "").RecordAt(0)
-	if rt.GateFor("a", "", "").AllowAt() {
-		t.Error("AllowAt() = true after RecordAt(0), want false")
+	// Probed with growth under the re-arm amount, which a recorded compaction
+	// refuses and "nothing recorded" allows.
+	if rt.GateFor("a", "", "").AllowAt(100) {
+		t.Error("AllowAt(100) = true after RecordAt(0), want false")
+	}
+}
+
+// TestProgressGateFailureCapOutlastsGrowth pins that growth reopens a gate
+// closed by a stored compaction and not one closed by spent retries. A
+// summarizer that keeps failing has no reason to succeed on a longer
+// transcript, and each retry is a model call.
+func TestProgressGateFailureCapOutlastsGrowth(t *testing.T) {
+	t.Parallel()
+
+	rt := New(&compaction.Config{TokenThreshold: 1000, EventRetentionSize: 2}, nil)
+	g := rt.GateFor("a", "", "")
+	g.RecordAt(2000)
+	if !g.AllowAt(4000) {
+		t.Fatal("AllowAt(4000) = false after 2000 tokens of growth, want true")
+	}
+	for range maxFailuresPerInvocation {
+		g.Failed()
+	}
+	if g.AllowAt(40000) {
+		t.Error("AllowAt(40000) = true after the retry budget was spent, want false however far the prompt has grown")
 	}
 }
 
@@ -147,14 +207,14 @@ func TestGateIsScopedPerAgent(t *testing.T) {
 	rt := New(&compaction.Config{TokenThreshold: 1000, EventRetentionSize: 2}, nil)
 	worker, critic := rt.GateFor("worker", "root", ""), rt.GateFor("critic", "root", "")
 
-	if !worker.AllowAt() || !critic.AllowAt() {
+	if !worker.AllowAt(2000) || !critic.AllowAt(2000) {
 		t.Fatal("both agents should start allowed")
 	}
 	worker.RecordAt(2000)
-	if worker.AllowAt() {
+	if worker.AllowAt(2000) {
 		t.Error("the worker compacted, so it should be gated")
 	}
-	if !critic.AllowAt() {
+	if !critic.AllowAt(2000) {
 		t.Error("the critic did not compact, so the worker's compaction must not gate it")
 	}
 
@@ -164,18 +224,18 @@ func TestGateIsScopedPerAgent(t *testing.T) {
 	// before every model call.
 	for range maxFailuresPerInvocation - 1 {
 		critic.Failed()
-		if !critic.AllowAt() {
+		if !critic.AllowAt(2000) {
 			t.Fatal("the critic gave up before its retry budget was spent")
 		}
 	}
 	critic.Failed()
-	if critic.AllowAt() {
+	if critic.AllowAt(2000) {
 		t.Error("the critic spent its retry budget and should stop attempting this invocation")
 	}
 	// And Recovered does not undo it: the prompt never dropped, so nothing
 	// reports recovery.
 	critic.Recovered()
-	if critic.AllowAt() {
+	if critic.AllowAt(2000) {
 		t.Error("Recovered reopened a gate closed by spent retries, which the prompt size cannot justify")
 	}
 	// A third agent, which has neither compacted nor failed, is untouched by
@@ -183,7 +243,7 @@ func TestGateIsScopedPerAgent(t *testing.T) {
 	// a compaction above, so AllowAt is false for it on its own account and the
 	// assertion would pass whether or not the counters were shared.
 	bystander := rt.GateFor("bystander", "root", "")
-	if !bystander.AllowAt() {
+	if !bystander.AllowAt(2000) {
 		t.Error("an agent that has neither compacted nor failed was gated by another agent's failures")
 	}
 }

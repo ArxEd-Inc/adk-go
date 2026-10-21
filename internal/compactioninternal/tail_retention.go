@@ -65,14 +65,16 @@ func (s TurnScope) visible(ev *session.Event) bool {
 // It exists so the caller can stop compaction repeating uselessly within one
 // turn without this package needing to know what an invocation is.
 type ProgressGate interface {
-	// AllowAt reports whether another attempt is worth making.
+	// AllowAt reports whether another attempt is worth making with the prompt
+	// at tokens.
 	//
-	// It takes no prompt size, because the size question is already answered
-	// before this is consulted: the caller only reaches here having found the
-	// prompt over the threshold, and calls Recovered as soon as it is under.
-	// The parameter this used to take was ignored by the only implementation,
-	// so the interface promised a size-aware decision that nothing made.
-	AllowAt() bool
+	// The caller only reaches here having found the prompt over the threshold,
+	// and calls Recovered as soon as it is under, so the size is not for
+	// comparing with the threshold. It lets a turn compact again after a pass
+	// that could not bring the prompt under: once the prompt has grown since
+	// that pass, the events that scrolled out of the retained tail are worth
+	// another one.
+	AllowAt(tokens int) bool
 	RecordAt(tokens int)
 	Recovered()
 	// Failed notes that an attempt was made and produced nothing storable, so
@@ -119,11 +121,11 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 	}
 
 	// Stop here when the last compaction in this turn has not yet brought the
-	// prompt back under the threshold. Compacting again would summarize a
-	// little more and leave the prompt just as far over it, paying for a model
-	// call each time.
-	if progress != nil && !progress.AllowAt() {
-		traceDeclined(ctx, cfg, sess, telemetry.CompactionTriggerTokenThreshold, "the previous compaction did not bring the prompt back under the threshold")
+	// prompt back under the threshold and the prompt has not grown enough
+	// since. Compacting again straight away would summarize a little more and
+	// leave the prompt just as far over it, paying for a model call each time.
+	if progress != nil && !progress.AllowAt(tokens) {
+		traceDeclined(ctx, cfg, sess, telemetry.CompactionTriggerTokenThreshold, "the previous compaction did not bring the prompt back under the threshold, and the prompt has not grown enough since to compact again")
 		return nil, noop, nil
 	}
 
@@ -176,15 +178,15 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 	// transient-error case and left four others: the caller can still discard
 	// the result because the turn was canceled, a re-read failed, a competing
 	// compaction landed, or the append failed. Each left the gate closed on a
-	// summary that never existed, and Recovered cannot reopen it because the
-	// prompt never drops.
+	// summary that never existed, and Recovered could not reopen it because
+	// the prompt never dropped.
 	// A failed or discarded attempt is not the same as a successful one and
-	// must not close the gate the way RecordAt does, because Recovered can
-	// never reopen it: the prompt did not drop, so nothing will report
-	// recovery. But it must not leave the gate wide open either. Doing that
-	// made a persistently failing summarizer retry before every model call for
-	// the life of the turn, 29 attempts across 30 rounds, each one a model call
-	// that produced nothing.
+	// must not close the gate the way RecordAt does: the prompt did not drop,
+	// so nothing will report recovery, and only further growth would reopen a
+	// window that nothing has summarized. But it must not leave the gate wide
+	// open either. Doing that made a persistently failing summarizer retry
+	// before every model call for the life of the turn, 29 attempts across 30
+	// rounds, each one a model call that produced nothing.
 	//
 	// Failed is the middle position: no more attempts in this invocation, and
 	// the next invocation starts fresh because the gate lives on the runtime
@@ -395,13 +397,12 @@ func selectTailRetentionWindow(events []*session.Event, retentionSize int, scope
 		// Only what this turn can see, which is the filter promptTokenCount
 		// already applies. The decision to compact is taken from this turn's
 		// visible prompt, so drawing the window from the whole session picks a
-		// different conversation: a sub-agent would spend its one allowed
-		// compaction on a sibling branch, its own prompt would not shrink by a
-		// token, and the progress gate would then stand down for the rest of an
-		// over-threshold turn -- the one strategy that bounds growth, disabled
-		// by having compacted the wrong thing. The sibling, meanwhile, has
-		// events summarized with none of the raw tail EventRetentionSize
-		// promises to keep.
+		// different conversation: a sub-agent would spend a compaction on a
+		// sibling branch, its own prompt would not shrink by a token, and the
+		// progress gate would then hold off until that prompt had grown further
+		// -- the one strategy that bounds growth, spent on the wrong thing. The
+		// sibling, meanwhile, has events summarized with none of the raw tail
+		// EventRetentionSize promises to keep.
 		if !scope.visible(ev) {
 			continue
 		}

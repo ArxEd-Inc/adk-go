@@ -1310,14 +1310,16 @@ func TestTailRetentionStandsDownTheSlidingWindow(t *testing.T) {
 	}
 }
 
-// toolLoopModel calls a tool repeatedly, then answers, always reporting the
-// same prompt size. It stands in for a long tool loop whose retained tail alone
-// already exceeds the threshold, so compacting cannot bring the prompt down.
+// toolLoopModel calls a tool repeatedly, then answers, reporting a prompt size
+// that grows by step on each call and is the same throughout when step is
+// zero. It stands in for a long tool loop whose retained tail alone already
+// exceeds the threshold, so compacting cannot bring the prompt down.
 type toolLoopModel struct {
 	mu     sync.Mutex
 	calls  int
 	rounds int
 	tokens int32
+	step   int32
 }
 
 func (m *toolLoopModel) Name() string { return "tool-loop" }
@@ -1329,7 +1331,7 @@ func (m *toolLoopModel) GenerateContent(_ context.Context, _ *model.LLMRequest, 
 	m.mu.Unlock()
 
 	return func(yield func(*model.LLMResponse, error) bool) {
-		usage := &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: m.tokens}
+		usage := &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: m.tokens + m.step*int32(n-1)}
 		if n <= m.rounds {
 			yield(&model.LLMResponse{
 				Content: &genai.Content{Role: "model", Parts: []*genai.Part{
@@ -1392,6 +1394,78 @@ func TestTailRetentionStopsWhenItIsNotHelping(t *testing.T) {
 	if m.calls < 3 {
 		t.Fatalf("the model only ran %d times, so the tool loop did not happen and this proved nothing", m.calls)
 	}
+}
+
+// TestTailRetentionCompactsAgainAsTheTurnGrows checks that a compaction which
+// leaves the prompt over the threshold does not end compaction for the turn.
+//
+// The events that scroll out of the retained tail as a tool loop keeps going
+// are compactable. Stopping for good after the first pass let one turn grow
+// unchecked to the model's context limit, so the progress gate reopens once the
+// prompt has grown by an eighth of the threshold since the pass. Growth under
+// that does not reopen it, which is what keeps this from being a summarizer
+// call before every model call.
+func TestTailRetentionCompactsAgainAsTheTurnGrows(t *testing.T) {
+	t.Parallel()
+
+	const threshold = 1000
+	run := func(t *testing.T, step int32) (summaries, modelCalls int) {
+		t.Helper()
+
+		ping, err := functiontool.New(functiontool.Config{Name: "ping", Description: "returns pong"},
+			func(_ agent.Context, _ struct{}) (string, error) { return "pong", nil })
+		if err != nil {
+			t.Fatalf("functiontool.New() error = %v", err)
+		}
+		m := &toolLoopModel{rounds: 8, tokens: 5000, step: step}
+		root, err := llmagent.New(llmagent.Config{Name: "assistant", Model: m, Tools: []tool.Tool{ping}})
+		if err != nil {
+			t.Fatalf("llmagent.New() error = %v", err)
+		}
+		summarizer := &recordingSummarizer{summary: "SUMMARY"}
+		r, err := New(Config{
+			AppName:           "compaction_app",
+			Agent:             root,
+			SessionService:    session.InMemoryService(),
+			AutoCreateSession: true,
+			Compaction: &compaction.Config{
+				TokenThreshold:     threshold,
+				EventRetentionSize: 2,
+				Summarizer:         summarizer,
+			},
+		})
+		if err != nil {
+			t.Fatalf("New() error = %v", err)
+		}
+		drain(t, r.Run(t.Context(), "u", "s", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}))
+		return summarizer.calls(), m.calls
+	}
+
+	t.Run("growth past the re-arm amount compacts again", func(t *testing.T) {
+		t.Parallel()
+
+		summaries, modelCalls := run(t, threshold/4)
+		if modelCalls < 8 {
+			t.Fatalf("the model only ran %d times, so the tool loop did not happen and this proved nothing", modelCalls)
+		}
+		if summaries < 2 {
+			t.Errorf("summarizer ran %d times while the prompt grew by a quarter of the threshold per round, want at least 2", summaries)
+		}
+	})
+
+	t.Run("growth short of the re-arm amount does not", func(t *testing.T) {
+		t.Parallel()
+
+		// Seven rounds of 10 tokens after the first pass is 70, short of the
+		// 125 that reopens the gate.
+		summaries, modelCalls := run(t, 10)
+		if modelCalls < 8 {
+			t.Fatalf("the model only ran %d times, so the tool loop did not happen and this proved nothing", modelCalls)
+		}
+		if summaries != 1 {
+			t.Errorf("summarizer ran %d times while the prompt grew by 70 tokens in all, want 1", summaries)
+		}
+	})
 }
 
 // TestRunnerDefaultSummarizerIsBounded pins that the summarizer the runner

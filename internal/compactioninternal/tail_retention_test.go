@@ -633,15 +633,73 @@ func TestPromptTokenCountAddsEventsSinceTheLastReport(t *testing.T) {
 // recordingGate captures the [ProgressGate] calls TailRetention makes.
 type recordingGate struct {
 	allow     bool
+	asked     []int
 	recorded  []int
 	recovered int
 	failed    int
 }
 
-func (g *recordingGate) AllowAt() bool  { return g.allow }
-func (g *recordingGate) RecordAt(t int) { g.recorded = append(g.recorded, t) }
-func (g *recordingGate) Recovered()     { g.recovered++ }
-func (g *recordingGate) Failed()        { g.failed++ }
+func (g *recordingGate) AllowAt(t int) bool { g.asked = append(g.asked, t); return g.allow }
+func (g *recordingGate) RecordAt(t int)     { g.recorded = append(g.recorded, t) }
+func (g *recordingGate) Recovered()         { g.recovered++ }
+func (g *recordingGate) Failed()            { g.failed++ }
+
+// TestTailRetentionAsksTheGateAtTheMeasuredPromptSize pins that the gate is
+// asked with the prompt count the threshold was checked against, and that a
+// turn which has already compacted compacts again when the gate allows it.
+//
+// The gate reopens on growth since the last compaction, which it can only
+// measure from the sizes it is told. Without the second pass a turn whose first
+// compaction left it over the threshold grew unchecked to the context limit.
+func TestTailRetentionAsksTheGateAtTheMeasuredPromptSize(t *testing.T) {
+	t.Parallel()
+
+	events := []*session.Event{
+		textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 2, "a1"),
+		compactionEvent("s1", 3, 1, 2, "earlier summary"),
+		textEvent("c", "inv1", 4, "q2"), modelTextEvent("d", "inv1", 5, "a2"),
+		textEvent("e", "inv1", 6, "q3"), withUsage(modelTextEvent("f", "inv1", 7, "a3"), 912),
+	}
+
+	t.Run("allowed", func(t *testing.T) {
+		t.Parallel()
+
+		gate := &recordingGate{allow: true}
+		sum := &fakeSummarizer{summary: "sum"}
+		cfg := &compaction.Config{TokenThreshold: 100, EventRetentionSize: 2, Summarizer: sum}
+		got, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, TurnScope{}, nil, gate)
+		if err != nil || got == nil {
+			t.Fatalf("tailRetentionStored() = %v, %v, want a second summary and no error", got, err)
+		}
+		if diff := cmp.Diff([]int{912}, gate.asked); diff != "" {
+			t.Errorf("AllowAt calls mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff([]int{912}, gate.recorded); diff != "" {
+			t.Errorf("RecordAt calls mismatch (-want +got):\n%s", diff)
+		}
+		if len(sum.windows) != 1 || !slices.Contains(sum.windows[0], "c") || slices.Contains(sum.windows[0], "a") {
+			t.Errorf("summarized windows = %v, want one that picks up after the earlier summary", sum.windows)
+		}
+	})
+
+	t.Run("refused", func(t *testing.T) {
+		t.Parallel()
+
+		gate := &recordingGate{allow: false}
+		sum := &fakeSummarizer{summary: "sum"}
+		cfg := &compaction.Config{TokenThreshold: 100, EventRetentionSize: 2, Summarizer: sum}
+		got, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, TurnScope{}, nil, gate)
+		if err != nil || got != nil {
+			t.Fatalf("tailRetentionStored() = %v, %v, want no summary and no error", got, err)
+		}
+		if diff := cmp.Diff([]int{912}, gate.asked); diff != "" {
+			t.Errorf("AllowAt calls mismatch (-want +got):\n%s", diff)
+		}
+		if sum.calls != 0 {
+			t.Errorf("summarizer ran %d times behind a closed gate, want 0", sum.calls)
+		}
+	})
+}
 
 // TestTailRetentionReArmsTheGateBelowTheThreshold pins that a prompt back under
 // the threshold re-arms the gate.
