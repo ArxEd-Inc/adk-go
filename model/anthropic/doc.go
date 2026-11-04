@@ -40,7 +40,11 @@
 // and direct Anthropic API backends are selectable via [Config] (Variant /
 // ANTHROPIC_USE_VERTEX); both paths are exercised.
 //
-// TODO(#225): replace this package with the upstream
-// google.golang.org/adk/v2/model/anthropic once google/adk-go merges Anthropic
-// support (PR #598 / #233). https://github.com/google/adk-go/issues/225
+// TODO(#225): replace this package with upstream's model/anthropicmodel
+// (google/adk-go#1866, experimental since v2.7.0) once it covers what this
+// package adds: streaming for callers that don't ask for it (needed at large
+// max_tokens), requests that set a thinking level, caller-placed prompt-cache
+// breakpoints with per-breakpoint TTLs, deferred tool loading with
+// tool_reference results, Files API document references, input_examples, and
+// cache-write usage split by TTL. https://github.com/google/adk-go/issues/225
 package anthropic
