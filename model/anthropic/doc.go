@@ -43,8 +43,10 @@
 // TODO(#225): replace this package with upstream's model/anthropicmodel
 // (google/adk-go#1866, experimental since v2.7.0) once it covers what this
 // package adds: streaming for callers that don't ask for it (needed at large
-// max_tokens), requests that set a thinking level, caller-placed prompt-cache
-// breakpoints with per-breakpoint TTLs, deferred tool loading with
-// tool_reference results, Files API document references, input_examples, and
-// cache-write usage split by TTL. https://github.com/google/adk-go/issues/225
+// max_tokens), requests that set a thinking level, thought signatures in this
+// package's encoding (sessions persisted through it replay them), caller-placed
+// prompt-cache breakpoints with per-breakpoint TTLs, deferred tool loading with
+// tool_reference results, Files API document references, input_examples,
+// cache-write usage split by TTL, and errors that wrap the SDK's
+// *anthropic.Error. https://github.com/google/adk-go/issues/225
 package anthropic
