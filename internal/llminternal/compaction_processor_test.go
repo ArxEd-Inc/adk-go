@@ -218,16 +218,17 @@ func (s *racingSummarizer) SummarizeEvents(ctx context.Context, events []*sessio
 	return compaction.SummarizeResult{Content: genai.NewContentFromText("SUMMARY", "model")}, nil
 }
 
-// TestCompactionProcessorDiscardsARacedSummary checks that a summary is thrown
-// away when another invocation appended inside its range while it was being
-// produced.
+// TestCompactionProcessorKeepsARacedSummaryAndTheRacerRaw checks that a
+// summary whose range gained an event while it was being produced is stored
+// with that event named as a hole.
 //
 // A summary records the holes inside its range, and that list is computed from
 // what the framework could see when it was built. An event that lands
-// afterwards is inside the range and named by nothing, so it reads as covered
-// and prompt assembly drops it, having been summarized by nothing. Discarding
-// costs one wasted model call; keeping it costs a turn of conversation.
-func TestCompactionProcessorDiscardsARacedSummary(t *testing.T) {
+// afterwards is inside the range and was summarized by nothing, so recorded as
+// it is it would read as covered and be dropped from the prompt. Naming it
+// keeps it raw; discarding the summary would protect it too, but throws away a
+// model call whose result is correct for everything else.
+func TestCompactionProcessorKeepsARacedSummaryAndTheRacerRaw(t *testing.T) {
 	t.Parallel()
 
 	svc, sess := tailRetentionFixture(t, 4)
@@ -244,8 +245,149 @@ func TestCompactionProcessorDiscardsARacedSummary(t *testing.T) {
 	if summarizer.racedInvocation == "" {
 		t.Fatal("the racing summarizer did not record what it appended")
 	}
-	if got := len(storedCompactions(t, svc)); got != 0 {
-		t.Errorf("stored %d compaction events, want 0: a summary whose range was raced must be discarded", got)
+	assertStoredWithHoleKeptRaw(t, svc, summarizer.racedInvocation, summarizer.racedTimestamp)
+}
+
+// TestCompactionProcessorKeepsASummaryOverAnEventFromASecondHandle checks the
+// same for an event that was stored before the window was chosen, through a
+// second handle on the session.
+//
+// An application's background bookkeeping writer that appends through its own
+// handle is not racing anything, but the handle the turn runs on never holds
+// its events, so every pass whose range reaches one finds it in the store and
+// not in its snapshot. Treated as a race, that discarded every such summary
+// after it was paid for, and because nothing was stored the next model call
+// paid for another.
+func TestCompactionProcessorKeepsASummaryOverAnEventFromASecondHandle(t *testing.T) {
+	t.Parallel()
+
+	svc, sess := tailRetentionFixture(t, 4)
+
+	bookkeeperHandle, err := svc.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "u", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	// Between the first two exchanges, so inside the range the window will
+	// claim, in the fixture turn's invocation.
+	record := session.NewEvent(t.Context(), "inv")
+	record.Author = "bookkeeper"
+	record.Timestamp = time.Unix(2, int64(500*time.Millisecond))
+	if err := svc.AppendEvent(t.Context(), bookkeeperHandle.Session, record); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	summarizer := &fixedSummarizer{}
+	if err := runCompactionProcessor(t, svc, sess, &compaction.Config{
+		TokenThreshold:     100,
+		EventRetentionSize: 2,
+		Summarizer:         summarizer,
+	}); err != nil {
+		t.Fatalf("CompactionRequestProcessor failed: %v", err)
+	}
+	if summarizer.calls == 0 {
+		t.Fatal("the summarizer never ran, so this test proved nothing")
+	}
+	assertStoredWithHoleKeptRaw(t, svc, record.InvocationID, record.Timestamp)
+}
+
+// assertStoredWithHoleKeptRaw checks that exactly one summary was stored, that
+// it names the event with the given invocation and timestamp as a hole, and
+// that prompt assembly keeps that event raw.
+func assertStoredWithHoleKeptRaw(t *testing.T, svc session.Service, invocationID string, timestamp time.Time) {
+	t.Helper()
+
+	records := storedCompactions(t, svc)
+	if len(records) != 1 {
+		t.Fatalf("stored %d compaction events, want 1: the summary must be kept", len(records))
+	}
+	rng := records[0].Actions.Compaction
+	if timestamp.Before(rng.StartTimestamp) || timestamp.After(rng.EndTimestamp) {
+		t.Fatalf("the event at %v is outside the stored range [%v, %v], so this test is not exercising the check",
+			timestamp, rng.StartTimestamp, rng.EndTimestamp)
+	}
+	var named bool
+	for _, ref := range rng.ExcludedEvents {
+		if ref.InvocationID == invocationID && ref.Timestamp.Equal(timestamp) {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("the stored summary's holes %v do not name the event it never saw", rng.ExcludedEvents)
+	}
+
+	got, err := svc.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "u", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	var stored []*session.Event
+	for ev := range got.Session.Events().All() {
+		stored = append(stored, ev)
+	}
+	for _, ev := range compactioninternal.Apply(stored) {
+		if ev.InvocationID == invocationID && ev.Timestamp.Equal(timestamp) {
+			return
+		}
+	}
+	t.Errorf("the event the summary never saw was dropped from the prompt")
+}
+
+// competingSummarizer stores another compaction record over the range it is
+// about to summarize, standing in for a concurrent invocation compacting the
+// same history during the model call.
+type competingSummarizer struct {
+	svc session.Service
+	t   *testing.T
+
+	// competed is set once the competing record is stored.
+	competed bool
+}
+
+func (s *competingSummarizer) SummarizeEvents(ctx context.Context, events []*session.Event) (compaction.SummarizeResult, error) {
+	other, err := s.svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u", SessionID: "s"})
+	if err != nil {
+		s.t.Fatalf("competing Get() error = %v", err)
+	}
+	rival := session.NewEvent(ctx, "other-invocation")
+	rival.Author = "user"
+	rival.Actions.Compaction = &session.EventCompaction{
+		StartTimestamp:   events[0].Timestamp,
+		EndTimestamp:     events[len(events)-1].Timestamp,
+		CompactedContent: genai.NewContentFromText("COMPETING SUMMARY", "model"),
+	}
+	if err := s.svc.AppendEvent(ctx, other.Session, rival); err != nil {
+		s.t.Fatalf("competing AppendEvent() error = %v", err)
+	}
+	s.competed = true
+	return compaction.SummarizeResult{Content: genai.NewContentFromText("SUMMARY", "model")}, nil
+}
+
+// TestCompactionProcessorDiscardsASummaryAnotherCompactionRaced checks that a
+// summary is still thrown away when another compaction over the same events
+// was stored while it was being produced.
+//
+// Two summaries whose ranges meet would each stand in for the same turns, so
+// the same content would be materialized twice into one prompt. A hole cannot
+// express that, so the later summary is abandoned and its model call wasted.
+func TestCompactionProcessorDiscardsASummaryAnotherCompactionRaced(t *testing.T) {
+	t.Parallel()
+
+	svc, sess := tailRetentionFixture(t, 4)
+
+	summarizer := &competingSummarizer{svc: svc, t: t}
+	if err := runCompactionProcessor(t, svc, sess, &compaction.Config{
+		TokenThreshold:     100,
+		EventRetentionSize: 2,
+		Summarizer:         summarizer,
+	}); err != nil {
+		t.Fatalf("CompactionRequestProcessor failed: %v", err)
+	}
+	if !summarizer.competed {
+		t.Fatal("the competing summarizer did not store its record")
+	}
+	for _, ev := range storedCompactions(t, svc) {
+		if ev.InvocationID != "other-invocation" {
+			t.Errorf("stored a summary from %q beside a competing one over the same events", ev.InvocationID)
+		}
 	}
 }
 

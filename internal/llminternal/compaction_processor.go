@@ -62,13 +62,13 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 
 		// Which events exist before the model call, captured now rather than
 		// read back later. sess is the live handle and every backend mutates
-		// it in place, so passing it as the "before" state to the race check
-		// below compares the session against itself: anything a sibling
-		// appended during the call is already in it, the check finds no
-		// difference, and the record is stored claiming to cover an event no
-		// summary describes. Sub-agents make that ordinary rather than
-		// theoretical, because parallel and workflow nodes hand this very
-		// session down to each child.
+		// it in place, so passing it as the "before" state to the checks below
+		// compares the session against itself: anything a sibling appended
+		// during the call is already in it, the checks find no difference, and
+		// the record is stored claiming to cover an event no summary
+		// describes. Sub-agents make that ordinary rather than theoretical,
+		// because parallel and workflow nodes hand this very session down to
+		// each child.
 		before := compactioninternal.KnownEventIDs(sess)
 
 		// Compaction is an optimisation, so a canceled or expired turn should
@@ -90,10 +90,12 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		}
 
 		// Summarizing takes a model call, which is long enough for another
-		// invocation on this session to append inside the range just chosen.
-		// Read the stored session and abandon the summary if anything landed
-		// inside it. Skipping costs one wasted call, where recording it would
-		// silently drop those turns from every later prompt.
+		// invocation on this session to append inside the range just chosen,
+		// and the store can also hold events this handle never saw: anything
+		// appended through a second handle on the session, before or during
+		// the call. Read the stored session to find them. Recorded as they
+		// are, they would read as covered and be dropped from every later
+		// prompt with no summary describing them.
 		//
 		// The read is only a comparison. The append below still goes to sess,
 		// for the identity reason above.
@@ -111,10 +113,22 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 			degrade(ctx, "token-threshold", err)
 			return
 		}
-		if compactioninternal.RangeRacedSince(latest, before, summary) {
+		// A competing summary over the same events cannot be reconciled with
+		// this one, since both would stand in for the same turns, so this one
+		// is abandoned and its call wasted.
+		if compactioninternal.CompactionRacedSince(latest, before, summary) {
 			finish(nil, "another compaction covering the same events landed while summarizing")
 			log.Printf("adk: discarding a tail-retention summary because the session changed inside its range while summarizing") //nolint:forbidigo // pre-slog call site
 			return
+		}
+		// An ordinary event inside the range is not in the summary, so it is
+		// named as a hole and stays raw, the way the repair below handles one
+		// that lands during the append. Discarding instead wasted a summary
+		// that is correct for everything else, and for an event appended
+		// through a second handle before the window was chosen it did so on
+		// every pass, since that event is never in this handle's snapshot.
+		if n := compactioninternal.ExcludeUnseen(summary, before, latest); n > 0 {
+			log.Printf("adk: kept a tail-retention summary and left %d event(s) it did not see raw", n) //nolint:forbidigo // pre-slog call site
 		}
 
 		// Re-checked before it is stored, the way the sliding-window path

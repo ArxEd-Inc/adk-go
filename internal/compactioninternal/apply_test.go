@@ -772,6 +772,121 @@ func TestRepairAfterAppendRescuesAStragglerFromThePrompt(t *testing.T) {
 	}
 }
 
+// bookkeepingEvent is an event a background bookkeeping writer in the same
+// application appends to the session: it carries no content, only a record the
+// application reads back later.
+func bookkeepingEvent(id, invocationID string, ts int) *session.Event {
+	return newEvent(id, invocationID, ts, "bookkeeper")
+}
+
+// TestExcludeUnseenNamesAnEventTheSnapshotNeverHeld pins that a summary keeps
+// an ordinary event it never saw out of its coverage instead of being thrown
+// away for it.
+//
+// The bookkeeping writer appends through its own handle on the session, so the
+// handle the window was chosen from never holds the event, although it was
+// stored before the window was chosen. It sits inside the range the summary
+// claims, and named by no hole it would read as covered and be dropped from
+// the prompt with nothing describing it.
+func TestExcludeUnseenNamesAnEventTheSnapshotNeverHeld(t *testing.T) {
+	t.Parallel()
+
+	before := []*session.Event{
+		textEvent("a", "inv1", 1, "q1"),
+		modelTextEvent("b", "inv1", 2, "a1"),
+		textEvent("c", "inv1", 4, "q2"),
+	}
+	known := KnownEventIDs(&staticSession{events: before})
+	summary := compactionEvent("s1", 9, 1, 4, "summary of the turn")
+	original := summary.Actions.Compaction
+
+	bookkeeping := bookkeepingEvent("ledger", "inv1", 3)
+	outside := bookkeepingEvent("ledger-later", "inv1", 6)
+	latest := &staticSession{events: []*session.Event{before[0], before[1], bookkeeping, before[2], outside}}
+
+	if got := ExcludeUnseen(summary, known, latest); got != 1 {
+		t.Fatalf("ExcludeUnseen() = %d, want 1: only the bookkeeping event inside the range is new", got)
+	}
+	if diff := cmp.Diff([]session.EventRef{excl("inv1", 3)}, summary.Actions.Compaction.ExcludedEvents); diff != "" {
+		t.Errorf("ExcludedEvents mismatch (-want +got):\n%s", diff)
+	}
+	if len(original.ExcludedEvents) != 0 {
+		t.Errorf("the record the summary was built with was edited in place: %v", original.ExcludedEvents)
+	}
+
+	got := ids(Apply(append(slices.Clone(latest.events), summary)))
+	if !slices.Contains(got, "ledger") {
+		t.Errorf("prompt %v drops the bookkeeping event, which the summary does not describe", got)
+	}
+	for _, id := range []string{"a", "b", "c"} {
+		if slices.Contains(got, id) {
+			t.Errorf("prompt %v keeps %q raw beside the summary that stands in for it", got, id)
+		}
+	}
+
+	// Named once: a second look finds nothing new.
+	if got := ExcludeUnseen(summary, known, latest); got != 0 {
+		t.Errorf("ExcludeUnseen() = %d on a second call, want 0: the event is already a hole", got)
+	}
+}
+
+// TestExcludeUnseenLeavesASummaryAloneWhenNothingIsNew pins that a summary
+// whose range holds only what the window was chosen from is stored as built.
+func TestExcludeUnseenLeavesASummaryAloneWhenNothingIsNew(t *testing.T) {
+	t.Parallel()
+
+	before := []*session.Event{
+		textEvent("server-a", "inv1", 1, "q1"),
+		modelTextEvent("server-b", "inv1", 2, "a1"),
+	}
+	known := KnownEventIDs(&staticSession{events: []*session.Event{
+		textEvent("client-a", "inv1", 1, "q1"),
+		modelTextEvent("client-b", "inv1", 2, "a1"),
+	}})
+	summary := compactionEvent("s1", 9, 1, 2, "summary of the turn")
+	original := summary.Actions.Compaction
+
+	// Renamed by the store, as one backend does on read, and joined by a
+	// competing record, which is not an ordinary event and is not named.
+	latest := &staticSession{events: append(slices.Clone(before), compactionEvent("rival", 8, 1, 2, "rival"))}
+	if got := ExcludeUnseen(summary, known, latest); got != 0 {
+		t.Errorf("ExcludeUnseen() = %d, want 0", got)
+	}
+	if summary.Actions.Compaction != original {
+		t.Error("the record was replaced although nothing was named")
+	}
+}
+
+// TestCompactionRacedSinceReportsOnlyACompetingCompaction pins the one race
+// that still discards a summary: another compaction record overlapping its
+// range, which would stand in for the same turns a second time.
+func TestCompactionRacedSinceReportsOnlyACompetingCompaction(t *testing.T) {
+	t.Parallel()
+
+	before := []*session.Event{
+		textEvent("a", "inv1", 1, "q1"),
+		modelTextEvent("b", "inv1", 2, "a1"),
+	}
+	earlier := compactionEvent("earlier", 3, 1, 2, "an earlier summary")
+	known := KnownEventIDs(&staticSession{events: append(slices.Clone(before), earlier)})
+	summary := compactionEvent("s1", 9, 1, 4, "summary of the turn")
+
+	ordinary := &staticSession{events: append(slices.Clone(before), earlier, bookkeepingEvent("ledger", "inv1", 3))}
+	if CompactionRacedSince(ordinary, known, summary) {
+		t.Error("CompactionRacedSince() = true for an ordinary event and a record the window already knew")
+	}
+
+	disjoint := &staticSession{events: append(slices.Clone(before), compactionEvent("later", 8, 5, 7, "later turns"))}
+	if CompactionRacedSince(disjoint, known, summary) {
+		t.Error("CompactionRacedSince() = true for a record whose range does not meet this one")
+	}
+
+	competing := &staticSession{events: append(slices.Clone(before), compactionEvent("rival", 8, 2, 3, "rival"))}
+	if !CompactionRacedSince(competing, known, summary) {
+		t.Error("CompactionRacedSince() = false, want true: a new record overlaps the range")
+	}
+}
+
 // TestTwoCorrectionsKeepBothStragglers pins that records over one range are
 // treated as corrections of each other rather than rivals.
 //

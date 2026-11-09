@@ -777,27 +777,7 @@ func RepairAfterAppend(stored *session.Event, known map[string]struct{}, latest 
 		return nil
 	}
 
-	var stragglers []session.EventRef
-	seen := make(map[string]struct{})
-	for _, ev := range collect(latest) {
-		if ev == nil || hasCompaction(ev) {
-			continue
-		}
-		if !inRange(ev, rng) || excludes(rng, ev) {
-			continue
-		}
-		k := refKey(ev)
-		if _, ok := known[k]; ok {
-			// Present when the window was chosen, so it is what the summary was
-			// built from rather than a straggler.
-			continue
-		}
-		if _, ok := seen[k]; ok {
-			continue
-		}
-		seen[k] = struct{}{}
-		stragglers = append(stragglers, session.EventRef{InvocationID: ev.InvocationID, Timestamp: ev.Timestamp})
-	}
+	stragglers := unseenInRange(rng, known, latest)
 	if len(stragglers) == 0 {
 		return nil
 	}
@@ -821,6 +801,106 @@ func RepairAfterAppend(stored *session.Event, known map[string]struct{}, latest 
 	corrected.Actions = stored.Actions
 	corrected.Actions.Compaction = &fixed
 	return &corrected
+}
+
+// ExcludeUnseen names as holes in summary's range the ordinary events latest
+// holds inside it that were absent when known was captured, and returns how
+// many it named. Call it after summarizing and before the append.
+//
+// Such an event was not in the window, so the summary does not describe it,
+// and left unnamed it reads as covered and prompt assembly drops it. Naming it
+// keeps it raw, which is what [RepairAfterAppend] does for one that lands
+// during the append itself. Discarding the summary instead protected the event
+// just as well, but threw away a summary that is correct for everything else
+// after it was paid for, and did so every time for an event that is not racing
+// at all: one an application appended through a second handle on the session
+// before the window was chosen, which the live handle never held.
+//
+// A competing compaction is not an ordinary event and is not named here; see
+// [CompactionRacedSince].
+//
+// The summary is not yet stored, so its record is replaced rather than edited
+// in place, the way RepairAfterAppend builds its correction.
+func ExcludeUnseen(summary *session.Event, known map[string]struct{}, latest session.Session) int {
+	if summary == nil || latest == nil {
+		return 0
+	}
+	rng := summary.Actions.Compaction
+	if rng == nil {
+		return 0
+	}
+
+	unseen := unseenInRange(rng, known, latest)
+	if len(unseen) == 0 {
+		return 0
+	}
+	fixed := *rng
+	fixed.ExcludedEvents = append(slices.Clone(rng.ExcludedEvents), unseen...)
+	summary.Actions.Compaction = &fixed
+	return len(unseen)
+}
+
+// CompactionRacedSince reports whether a compaction record overlapping
+// summary's range arrived in latest after known was captured.
+//
+// Two summaries whose ranges meet would each stand in for the same turns, so
+// the same content is materialized twice into one prompt, and naming a hole
+// cannot fix that. Callers discard the summary when this returns true. An
+// ordinary event that arrived inside the range is handled by [ExcludeUnseen]
+// instead.
+func CompactionRacedSince(latest session.Session, known map[string]struct{}, summary *session.Event) bool {
+	if latest == nil || summary == nil {
+		return false
+	}
+	rng := summary.Actions.Compaction
+	if rng == nil {
+		return false
+	}
+
+	for _, ev := range collect(latest) {
+		if !hasCompaction(ev) {
+			continue
+		}
+		if _, seen := known[refKey(ev)]; seen {
+			continue
+		}
+		if overlaps(rng, ev.Actions.Compaction) {
+			return true
+		}
+	}
+	return false
+}
+
+// unseenInRange returns a reference to each ordinary event in latest that sits
+// inside rng, is not already named as one of its holes, and was absent when
+// known was captured, once per reference key.
+//
+// Each reference is built from the event as latest holds it, since that is
+// what prompt assembly will compare against: the Vertex AI service restamps an
+// event on read.
+func unseenInRange(rng *session.EventCompaction, known map[string]struct{}, latest session.Session) []session.EventRef {
+	var unseen []session.EventRef
+	seen := make(map[string]struct{})
+	for _, ev := range collect(latest) {
+		if ev == nil || hasCompaction(ev) {
+			continue
+		}
+		if !inRange(ev, rng) || excludes(rng, ev) {
+			continue
+		}
+		k := refKey(ev)
+		if _, ok := known[k]; ok {
+			// Present when the window was chosen, so it is what the summary was
+			// built from rather than a newcomer.
+			continue
+		}
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		unseen = append(unseen, session.EventRef{InvocationID: ev.InvocationID, Timestamp: ev.Timestamp})
+	}
+	return unseen
 }
 
 // sameSummaryContent reports whether two records carry the same summary text.
