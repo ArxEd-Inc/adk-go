@@ -96,7 +96,7 @@ func (s *filesTestServer) serve(w http.ResponseWriter, r *http.Request) {
 		if missing != "" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprintf(w, `{"type":"error","error":{"type":"not_found_error","message":"File not found: %s"}}`, missing)
+			_, _ = fmt.Fprintf(w, `{"type":"error","error":{"type":"not_found_error","message":"File not found: %s"}}`, missing)
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -130,7 +130,7 @@ func (s *filesTestServer) serveUpload(w http.ResponseWriter, r *http.Request) {
 	id := fmt.Sprintf("file_%d", len(s.uploads))
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"id":%q,"type":"file","filename":%q,"mime_type":"application/pdf","size_bytes":1,"created_at":"2026-01-01T00:00:00Z","expires_at":%q}`,
+	_, _ = fmt.Fprintf(w, `{"id":%q,"type":"file","filename":%q,"mime_type":"application/pdf","size_bytes":1,"created_at":"2026-01-01T00:00:00Z","expires_at":%q}`,
 		id, header.Filename, time.Now().Add(24*time.Hour).UTC().Format(time.RFC3339))
 }
 
@@ -294,13 +294,11 @@ func TestFilesConcurrentRequestsShareOneUpload(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, 5)
 	for i := range errs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for _, err := range llm.GenerateContent(t.Context(), reportRequest(report), false) {
 				errs[i] = err
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	for _, err := range errs {

@@ -193,11 +193,9 @@ func (r *filesResolver) resolve(ctx context.Context, req *model.LLMRequest) (map
 	ids := make([]string, len(docs))
 	var wg sync.WaitGroup
 	for i, doc := range docs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			ids[i], uploadErrs[i] = r.fileIDFor(ctx, doc.key, doc.blob)
-		}()
+		})
 	}
 	wg.Wait()
 

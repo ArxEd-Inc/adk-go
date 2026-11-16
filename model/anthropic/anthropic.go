@@ -84,7 +84,7 @@ func NewModel(ctx context.Context, modelName anthropicsdk.Model, cfg *Config) (m
 	}
 
 	if cfg.Files != nil && variant != VariantAnthropicAPI {
-		return nil, fmt.Errorf("Files requires the %s variant, not %s", VariantAnthropicAPI, variant)
+		return nil, fmt.Errorf("the Files config requires the %s variant, not %s", VariantAnthropicAPI, variant)
 	}
 
 	var client anthropicsdk.Client

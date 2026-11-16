@@ -27,8 +27,6 @@ import (
 	"google.golang.org/adk/v2/model/anthropic/internal/converters"
 )
 
-func ptr[T any](v T) *T { return &v }
-
 func userReq(cfg *genai.GenerateContentConfig) *model.LLMRequest {
 	return &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("hi", "user")},
@@ -44,7 +42,6 @@ func TestConvertRequestPerModelEffort(t *testing.T) {
 	params, _, err := m.convertRequest(userReq(&genai.GenerateContentConfig{
 		ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh},
 	}), nil)
-
 	if err != nil {
 		t.Fatalf("convertRequest: %v", err)
 	}
@@ -63,7 +60,6 @@ func TestConvertRequestEffortFallsBackToLevel(t *testing.T) {
 	params, _, err := m.convertRequest(userReq(&genai.GenerateContentConfig{
 		ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh},
 	}), nil)
-
 	if err != nil {
 		t.Fatalf("convertRequest: %v", err)
 	}
@@ -98,7 +94,6 @@ func TestConvertRequestBudgetModeThinking(t *testing.T) {
 	params, _, err := m.convertRequest(userReq(&genai.GenerateContentConfig{
 		ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh},
 	}), nil)
-
 	if err != nil {
 		t.Fatalf("convertRequest: %v", err)
 	}
@@ -121,10 +116,9 @@ func TestConvertRequestBudgetModeThinking(t *testing.T) {
 func TestConvertRequestDropsSamplingParams(t *testing.T) {
 	m := &anthropicModel{name: "claude-opus-4-8", defaultMaxTokens: 64000, effort: EffortXHigh}
 	params, _, err := m.convertRequest(userReq(&genai.GenerateContentConfig{
-		Temperature: ptr(float32(0.7)),
-		TopP:        ptr(float32(0.9)),
+		Temperature: new(float32(0.7)),
+		TopP:        new(float32(0.9)),
 	}), nil)
-
 	if err != nil {
 		t.Fatalf("convertRequest: %v", err)
 	}
@@ -151,7 +145,6 @@ func TestConvertRequestResponseJsonSchema(t *testing.T) {
 			"required":   []any{"name"},
 		},
 	}), nil)
-
 	if err != nil {
 		t.Fatalf("convertRequest: %v", err)
 	}
@@ -224,7 +217,6 @@ func TestConvertRequestMarkedPartCarriesCacheControl(t *testing.T) {
 			{Text: "Which species is this?"},
 		}}},
 	}, nil)
-
 	if err != nil {
 		t.Fatalf("convertRequest: %v", err)
 	}

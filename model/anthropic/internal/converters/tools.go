@@ -23,7 +23,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -194,10 +196,8 @@ func schemaIsDocumented(schema any) bool {
 	for _, keyword := range subschemaArrayKeywords {
 		switch subschemas := schemaMap[keyword].(type) {
 		case []any:
-			for _, subschema := range subschemas {
-				if schemaIsDocumented(subschema) {
-					return true
-				}
+			if slices.ContainsFunc(subschemas, schemaIsDocumented) {
+				return true
 			}
 		case []map[string]any: // SchemaToMap's anyOf
 			for _, subschema := range subschemas {
@@ -239,9 +239,7 @@ func functionInputSchema(
 		if defs, ok := schema["$defs"].(map[string]any); ok {
 			if target := resolveDefRef(ref, defs); target != nil {
 				delete(schema, "$ref")
-				for key, value := range target {
-					schema[key] = value
-				}
+				maps.Copy(schema, target)
 			}
 		}
 	}
@@ -550,7 +548,7 @@ func resolveToolChoice(config *genai.ToolConfig) (resolvedToolChoice, error) {
 
 	if len(fcc.AllowedFunctionNames) > 1 {
 		return resolvedToolChoice{}, fmt.Errorf(
-			"Anthropic does not support multiple AllowedFunctionNames (got %d); use a single function name or remove the restriction",
+			"multiple AllowedFunctionNames are not supported by Anthropic (got %d); use a single function name or remove the restriction",
 			len(fcc.AllowedFunctionNames),
 		)
 	}

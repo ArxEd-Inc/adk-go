@@ -18,6 +18,8 @@
 package anthropic
 
 import (
+	"slices"
+
 	anthropicsdk "github.com/anthropics/anthropic-sdk-go"
 	"google.golang.org/genai"
 
@@ -86,11 +88,11 @@ func applyCacheBreakpoints(
 	// that tool is also the named static-prefix tool, this assignment
 	// overwrites the one above, leaving a single marker on the wire.
 	if cfg.Tools != nil {
-		for i := len(params.Tools) - 1; i >= 0; i-- {
-			if converters.IsDeferredTool(params.Tools[i]) {
+		for _, toolParam := range slices.Backward(params.Tools) {
+			if converters.IsDeferredTool(toolParam) {
 				continue
 			}
-			if tool := params.Tools[i].OfTool; tool != nil {
+			if tool := toolParam.OfTool; tool != nil {
 				tool.CacheControl = newCacheControl(cfg.Tools)
 			}
 			break
@@ -135,8 +137,8 @@ func applyCacheBreakpoints(
 	// 6. Conversation history — the newest cacheable content block, searching
 	// messages from last to first
 	if cfg.ConversationHistory != nil {
-		for i := len(params.Messages) - 1; i >= 0; i-- {
-			if setLastCacheableBlock(params.Messages[i].Content, cfg.ConversationHistory) {
+		for _, message := range slices.Backward(params.Messages) {
+			if setLastCacheableBlock(message.Content, cfg.ConversationHistory) {
 				break
 			}
 		}
@@ -171,8 +173,8 @@ func blockPosition(messages []anthropicsdk.MessageParam, ordinal int) (messageIn
 // user-role message, or -1 when messages holds fewer than two.
 func secondNewestUserMessageIndex(messages []anthropicsdk.MessageParam) int {
 	users := 0
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == anthropicsdk.MessageParamRoleUser {
+	for i, message := range slices.Backward(messages) {
+		if message.Role == anthropicsdk.MessageParamRoleUser {
 			users++
 			if users == 2 {
 				return i
@@ -187,8 +189,8 @@ func secondNewestUserMessageIndex(messages []anthropicsdk.MessageParam) int {
 // redacted-thinking blocks cannot carry cache_control and are skipped, so a
 // message consisting only of those reports false.
 func setLastCacheableBlock(content []anthropicsdk.ContentBlockParamUnion, bp *CacheBreakpoint) bool {
-	for i := len(content) - 1; i >= 0; i-- {
-		if ccPtr := content[i].GetCacheControl(); ccPtr != nil {
+	for _, block := range slices.Backward(content) {
+		if ccPtr := block.GetCacheControl(); ccPtr != nil {
 			*ccPtr = newCacheControl(bp)
 			return true
 		}

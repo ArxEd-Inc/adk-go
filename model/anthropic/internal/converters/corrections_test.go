@@ -25,8 +25,6 @@ import (
 	"google.golang.org/genai"
 )
 
-func ptr[T any](v T) *T { return &v }
-
 // TestThinkingConfigToAnthropic covers the thinking mapping in both modes:
 // adaptive mode emits adaptive thinking (with an effort hint from the level) or
 // off; budget mode emits a manual budget_tokens form (per level) or off. The
@@ -43,16 +41,16 @@ func TestThinkingConfigToAnthropic(t *testing.T) {
 		// Adaptive mode (the default, for adaptive-capable models).
 		{name: "nil is off", cfg: nil, wantOn: false},
 		{name: "minimal is off", cfg: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMinimal}, wantOn: false},
-		{name: "explicit zero budget is off", cfg: &genai.ThinkingConfig{ThinkingBudget: ptr(int32(0))}, wantOn: false},
+		{name: "explicit zero budget is off", cfg: &genai.ThinkingConfig{ThinkingBudget: new(int32(0))}, wantOn: false},
 		{name: "high is adaptive+high", cfg: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}, wantOn: true, wantEffort: anthropic.OutputConfigEffortHigh},
 		{name: "medium is adaptive+medium", cfg: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMedium}, wantOn: true, wantEffort: anthropic.OutputConfigEffortMedium},
 		{name: "low is adaptive+low", cfg: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow}, wantOn: true, wantEffort: anthropic.OutputConfigEffortLow},
-		{name: "nonzero budget is adaptive (no manual form)", cfg: &genai.ThinkingConfig{ThinkingBudget: ptr(int32(8000))}, wantOn: true},
+		{name: "nonzero budget is adaptive (no manual form)", cfg: &genai.ThinkingConfig{ThinkingBudget: new(int32(8000))}, wantOn: true},
 
 		// Budget mode (for models that reject adaptive thinking + effort, e.g. Haiku 4.5).
 		{name: "budget: nil is off", cfg: nil, budgetMode: true, wantOn: false},
 		{name: "budget: minimal is off", cfg: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMinimal}, budgetMode: true, wantOn: false},
-		{name: "budget: explicit zero budget is off", cfg: &genai.ThinkingConfig{ThinkingBudget: ptr(int32(0))}, budgetMode: true, wantOn: false},
+		{name: "budget: explicit zero budget is off", cfg: &genai.ThinkingConfig{ThinkingBudget: new(int32(0))}, budgetMode: true, wantOn: false},
 		{name: "budget: unspecified level is off", cfg: &genai.ThinkingConfig{}, budgetMode: true, wantOn: false},
 		{name: "budget: high is enabled 24000", cfg: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}, budgetMode: true, wantOn: true, wantBudget: 24000},
 		{name: "budget: medium is enabled 5000", cfg: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMedium}, budgetMode: true, wantOn: true, wantBudget: 5000},

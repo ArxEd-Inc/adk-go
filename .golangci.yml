@@ -108,6 +108,11 @@ linters:
           - goheader
           - errcheck
           - staticcheck
+      # Vendored from github.com/Alcova-AI/adk-anthropic-go, so it carries that
+      # project's attribution rather than this header (see internal/style_test.go).
+      - path: '^model/anthropic/'
+        linters:
+          - goheader
       # Don't enforce doc comments on internal (non-importable) packages or on
       # examples (demonstration code, not an importable API surface), while
       # keeping any other revive rules active there.
