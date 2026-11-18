@@ -67,6 +67,7 @@ func buildParamsWith(modelName string, req *model.LLMRequest, opts Options) (oai
 
 	contentOpts := contentOptions{
 		modelName:         string(params.Model),
+		mediaResolution:   requestMediaResolution(req),
 		toolReferencesKey: opts.ToolReferencesResponseKey,
 		deferredTools:     deferred,
 	}
@@ -153,6 +154,14 @@ func moveInstructionsToDeveloperMessage(params *oairesponses.ResponseNewParams, 
 	params.Instructions = param.Opt[string]{}
 }
 
+// requestMediaResolution is the MediaResolution req's config sets, or "".
+func requestMediaResolution(req *model.LLMRequest) genai.MediaResolution {
+	if req.Config == nil {
+		return ""
+	}
+	return req.Config.MediaResolution
+}
+
 // splitDeferredTools separates the tools the request declares from those its
 // dispatch entries defer, which are keyed by name for a function response to
 // load (see contentOptions.deferredTools).
@@ -175,6 +184,10 @@ func splitDeferredTools(req *model.LLMRequest, tools []oairesponses.ToolUnionPar
 // contentOptions configures convertContentsWith. The zero value places no
 // breakpoint and loads no tool.
 type contentOptions struct {
+	// mediaResolution is the request's MediaResolution, the detail of media
+	// whose part sets none.
+	mediaResolution genai.MediaResolution
+
 	// toolReferencesKey names the function-response key under which a tool
 	// lists tools to make callable, or "" for none. Each listed tool the
 	// request defers is loaded by an additional_tools item right after the
@@ -288,7 +301,7 @@ func convertContentsWith(contents []*genai.Content, opts contentOptions) (oaires
 			// the same part and would otherwise have carried it out unnoticed.
 			// Media is excluded from the report because this endpoint emits it
 			// below, as Chat Completions does.
-			if field := shared.UnsupportedPayload(part, shared.PartFieldMedia, shared.PartFieldCodeExecution); field != "" {
+			if field := shared.UnsupportedPayload(part, shared.PartFieldMedia, shared.PartFieldCodeExecution, shared.PartFieldMediaResolution); field != "" {
 				return nil, false, fmt.Errorf("openai: unsupported content part: %s", field)
 			}
 			// Same fenced text adk-python's Responses converter sends. Chat
@@ -339,8 +352,9 @@ func convertContentsWith(contents []*genai.Content, opts contentOptions) (oaires
 			// After the part's own text, so that "describe this:" keeps its
 			// place ahead of the image it introduces, and before the call
 			// switch below, whose flush has to carry the media out with it.
+			detail := mediaDetail(part.MediaResolution, opts.mediaResolution)
 			for _, m := range media {
-				buffered = append(buffered, bufferedContent{media: &m})
+				buffered = append(buffered, bufferedContent{media: &m, detail: detail})
 			}
 			if opts.markedPart != nil && part == opts.markedPart && len(buffered) > before {
 				// The part's own content ends where its last piece does. A
@@ -438,17 +452,35 @@ type bufferedContent struct {
 	// phase is the phase of the assistant message the text came from, or ""
 	// when it stated none.
 	phase oairesponses.ResponseOutputMessagePhase
+	// detail is the detail media is sent at; see mediaDetail.
+	detail string
 }
 
-// imageInputDetail is the detail level every image input carries.
-//
-// ResponseInputImageParam tags Detail as api:"required" and omitzero at the
-// same time, so an unset value does not fail to compile — it vanishes from the
-// request and the server decides what was meant. "auto" is therefore sent
-// explicitly rather than left to a default. genai.Part.MediaResolution is the
-// caller's way to ask for a level, and it is refused while media is sent
-// rather than mapped onto this field; see shared.UnsupportedPayload.
-const imageInputDetail = oairesponses.ResponseInputImageDetailAuto
+// mediaDetail is the detail a media part is sent at: the part's own
+// MediaResolution when it sets one, else the request's. High asks for "high"
+// and low for "low"; anything else, unset included, is "auto". ImageParam and
+// FileParam tag Detail as required and omitzero at once, so an unset value
+// would vanish from the request; "auto" is therefore sent explicitly.
+func mediaDetail(part *genai.PartMediaResolution, request genai.MediaResolution) string {
+	if part != nil && part.Level != "" {
+		switch part.Level {
+		case genai.PartMediaResolutionLevelMediaResolutionHigh, genai.PartMediaResolutionLevelMediaResolutionUltraHigh:
+			return "high"
+		case genai.PartMediaResolutionLevelMediaResolutionLow:
+			return "low"
+		default:
+			return "auto"
+		}
+	}
+	switch request {
+	case genai.MediaResolutionHigh:
+		return "high"
+	case genai.MediaResolutionLow:
+		return "low"
+	default:
+		return "auto"
+	}
+}
 
 // newMessage builds an easy input message for an already-normalized role.
 func newMessage(msgRole oairesponses.EasyInputMessageRole, buffered []bufferedContent) (*oairesponses.EasyInputMessageParam, error) {
@@ -462,7 +494,7 @@ func newMessage(msgRole oairesponses.EasyInputMessageRole, buffered []bufferedCo
 			if msgRole == oairesponses.EasyInputMessageRoleSystem || msgRole == oairesponses.EasyInputMessageRoleDeveloper {
 				return nil, fmt.Errorf("openai: media in a %s message is not supported: %s", msgRole, b.media.MIMEType)
 			}
-			content, err := newMediaContent(*b.media)
+			content, err := newMediaContent(*b.media, b.detail)
 			if err != nil {
 				return nil, err
 			}
@@ -528,10 +560,13 @@ func textBreakpoint(bp *shared.CacheBreakpoint) oairesponses.ResponseInputTextPr
 // which of that field's three ways of naming the bytes is used. The two vary
 // independently: an image uploaded to the provider stays a file id rather than
 // becoming a location for the server to fetch.
-func newMediaContent(m shared.Media) (oairesponses.ResponseInputContentUnionParam, error) {
+func newMediaContent(m shared.Media, detail string) (oairesponses.ResponseInputContentUnionParam, error) {
+	if detail == "" {
+		detail = "auto"
+	}
 	switch m.Kind {
 	case shared.MediaKindImage:
-		image := oairesponses.ResponseInputImageParam{Detail: imageInputDetail}
+		image := oairesponses.ResponseInputImageParam{Detail: oairesponses.ResponseInputImageDetail(detail)}
 		switch m.Source {
 		case shared.MediaSourceData:
 			image.ImageURL = param.NewOpt(m.DataURL())
@@ -544,7 +579,7 @@ func newMediaContent(m shared.Media) (oairesponses.ResponseInputContentUnionPara
 		}
 		return oairesponses.ResponseInputContentUnionParam{OfInputImage: &image}, nil
 	case shared.MediaKindFile:
-		file := oairesponses.ResponseInputFileParam{}
+		file := oairesponses.ResponseInputFileParam{Detail: oairesponses.ResponseInputFileDetail(detail)}
 		switch m.Source {
 		case shared.MediaSourceData:
 			file.FileData = param.NewOpt(m.DataURL())
@@ -667,7 +702,10 @@ func newFunctionResponse(t *shared.CallTracker, fr *genai.FunctionResponse) (*oa
 // supportedConfigFields adds StopSequences to the fields both endpoints support,
 // for the empty list alone: it asks for no stop sequences, which needs no wire
 // field, while applyGenerationConfig refuses a non-empty one by name.
-var supportedConfigFields = append(slices.Clone(shared.SupportedConfigFields), "StopSequences")
+//
+// MediaResolution is supported here alone: Responses maps it onto the detail
+// its image and file inputs take (see mediaDetail).
+var supportedConfigFields = append(slices.Clone(shared.SupportedConfigFields), "StopSequences", "MediaResolution")
 
 // applyGenerationConfig translates our generic generation configuration into
 // OpenAI-specific parameters. We also validate and return errors for features

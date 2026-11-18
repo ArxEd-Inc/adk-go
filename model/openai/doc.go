@@ -29,18 +29,19 @@
 // not know, including one genai adds later, is rejected, as is an unknown field
 // of HTTPOptions or ThinkingConfig. Rejection keys on presence,
 // which is only observable where the zero value cannot itself be a setting, so
-// a plain bool or string carrying its zero — AudioTimestamp false, CachedContent
-// or MediaResolution empty — passes unremarked, as does HTTPOptions.Headers,
+// a plain bool or string carrying its zero — AudioTimestamp false or
+// CachedContent empty — passes unremarked, as does HTTPOptions.Headers,
 // ignored by design because headers addressed to another backend must not reach
 // OpenAI.
 //
 //	Translated  Temperature, TopP, MaxOutputTokens, SystemInstruction,
 //	            ResponseMIMEType, ResponseSchema, ResponseJsonSchema,
 //	            ResponseLogprobs with Logprobs, Tools, ToolConfig,
-//	            ThinkingConfig, ServiceTier, HTTPOptions.Timeout
+//	            ThinkingConfig, ServiceTier, HTTPOptions.Timeout,
+//	            MediaResolution
 //	Rejected    TopK, CandidateCount above one, Labels, SafetySettings, an
 //	            unsupported ResponseMIMEType, CachedContent, ResponseModalities,
-//	            MediaResolution, SpeechConfig, AudioTimestamp, ImageConfig,
+//	            SpeechConfig, AudioTimestamp, ImageConfig,
 //	            RoutingConfig, ModelSelectionConfig, ModelArmorConfig,
 //	            EnableEnhancedCivicAnswers, AudioTranscriptionConfig,
 //	            ContinuationToken, HTTPOptions apart from Timeout and Headers,
@@ -62,9 +63,14 @@
 // aggregated response, or an error wrapping [ErrEmptyResponse] when the stream
 // ends without one.
 //
+// MediaResolution, the request's or a media part's own, sets the detail its
+// images and files are sent at: high for high, low for low, auto otherwise.
+//
 // Function tools are sent with strict parameter validation disabled, and that
 // is not configurable, so tool call arguments are best effort rather than
-// guaranteed to match the declared parameter schema.
+// guaranteed to match the declared parameter schema. A function's response
+// schema, which a function tool has no field for, is appended to its
+// description when the schema documents anything.
 //
 // A successful fallback from a response.completed conversion failure records
 // "openai.terminal_response_conversion_failed" on the active OpenTelemetry span

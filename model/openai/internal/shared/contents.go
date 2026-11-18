@@ -17,6 +17,7 @@ package shared
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -107,6 +108,9 @@ const (
 	// PartFieldCodeExecution is ExecutableCode and CodeExecutionResult, which
 	// both endpoints send as text. See CodeExecutionText.
 	PartFieldCodeExecution
+	// PartFieldMediaResolution is a media part's MediaResolution, for an
+	// endpoint that maps it onto the detail its media fields take.
+	PartFieldMediaResolution
 )
 
 // UnsupportedPayload names the first field on part that the calling endpoint
@@ -153,6 +157,11 @@ func UnsupportedPayload(part *genai.Part, emitted ...PartField) string {
 			rest.ExecutableCode = nil
 			rest.CodeExecutionResult = nil
 		}
+	}
+	// After the loop, since PartFieldMedia above reinstates the qualifier on a
+	// media part whichever order the groups were passed in.
+	if slices.Contains(emitted, PartFieldMediaResolution) {
+		rest.MediaResolution = nil
 	}
 
 	v := reflect.ValueOf(rest)

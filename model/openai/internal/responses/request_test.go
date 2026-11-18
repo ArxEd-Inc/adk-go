@@ -1714,7 +1714,6 @@ func TestApplyGenerationConfigRejectsUnsupportedFields(t *testing.T) {
 		{"ModelSelectionConfig", &genai.GenerateContentConfig{ModelSelectionConfig: &genai.ModelSelectionConfig{}}},
 		{"CachedContent", &genai.GenerateContentConfig{CachedContent: "cached"}},
 		{"ResponseModalities", &genai.GenerateContentConfig{ResponseModalities: []string{"AUDIO"}}},
-		{"MediaResolution", &genai.GenerateContentConfig{MediaResolution: genai.MediaResolutionLow}},
 		{"SpeechConfig", &genai.GenerateContentConfig{SpeechConfig: &genai.SpeechConfig{}}},
 		{"AudioTimestamp", &genai.GenerateContentConfig{AudioTimestamp: true}},
 		{"ImageConfig", &genai.GenerateContentConfig{ImageConfig: &genai.ImageConfig{}}},

@@ -15,7 +15,11 @@
 package responses
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/openai/openai-go/v3/packages/param"
 	oairesponses "github.com/openai/openai-go/v3/responses"
@@ -89,10 +93,130 @@ func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*oairesponses.Fu
 		Parameters: paramsMap,
 		Strict:     param.NewOpt(false),
 	}
-	if fn.Description != "" {
-		fnParam.Description = param.NewOpt(fn.Description)
+	if description := functionDescription(fn); description != "" {
+		fnParam.Description = param.NewOpt(description)
 	}
 	return fnParam, nil
+}
+
+// responseSchemaLeadIn introduces a function's response schema where
+// functionDescription appends it to the tool description.
+const responseSchemaLeadIn = "The result conforms to this JSON Schema: "
+
+// functionDescription returns the declaration's description with its response
+// schema appended as compact JSON when that schema carries documentation. A
+// function tool has no field for a response schema, so without this the
+// documentation a declaration gives its result (what fields mean, which values
+// occur) never reaches the model. A response schema with no description or
+// title anywhere only restates the structure the result itself shows, so it is
+// left out and the description is returned unchanged. Map keys encode sorted,
+// so the description is byte-stable across requests, as prompt caching needs.
+func functionDescription(fn *genai.FunctionDeclaration) string {
+	schema := functionResponseSchemaMap(fn)
+	if !schemaIsDocumented(schema) {
+		return fn.Description
+	}
+	var schemaJSON bytes.Buffer
+	encoder := json.NewEncoder(&schemaJSON)
+	// Leave &, < and > readable, as they are in the rest of the description.
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(schema); err != nil {
+		return fn.Description
+	}
+	rendered := responseSchemaLeadIn + strings.TrimSuffix(schemaJSON.String(), "\n")
+	description := strings.TrimRight(fn.Description, " \t\n")
+	if description == "" {
+		return rendered
+	}
+	return description + "\n\n" + rendered
+}
+
+// functionResponseSchemaMap returns the declaration's response schema as a
+// JSON Schema map, preferring ResponseJsonSchema over Response, or nil when it
+// sets neither or the schema does not convert.
+func functionResponseSchemaMap(fn *genai.FunctionDeclaration) map[string]any {
+	var (
+		schema map[string]any
+		err    error
+	)
+	switch {
+	case fn.ResponseJsonSchema != nil:
+		if genaiSchema, ok := fn.ResponseJsonSchema.(*genai.Schema); ok {
+			schema, err = shared.SchemaToMap(genaiSchema)
+		} else {
+			schema, err = shared.NormalizeSchema(fn.ResponseJsonSchema)
+		}
+	case fn.Response != nil:
+		schema, err = shared.SchemaToMap(fn.Response)
+	}
+	if err != nil {
+		return nil
+	}
+	return schema
+}
+
+var (
+	// subschemaMapKeywords name the JSON Schema keywords whose values map
+	// names to subschemas.
+	subschemaMapKeywords = []string{"$defs", "definitions", "properties", "patternProperties", "dependentSchemas"}
+
+	// subschemaArrayKeywords name the JSON Schema keywords whose values are
+	// arrays of subschemas (items only in its array form; subschemaKeywords
+	// covers the single-schema form).
+	subschemaArrayKeywords = []string{"allOf", "anyOf", "oneOf", "prefixItems", "items"}
+
+	// subschemaKeywords name the JSON Schema keywords whose values are single
+	// subschemas.
+	subschemaKeywords = []string{
+		"items", "additionalProperties", "additionalItems", "unevaluatedProperties", "unevaluatedItems",
+		"contains", "propertyNames", "not", "if", "then", "else", "contentSchema",
+	}
+)
+
+// schemaIsDocumented reports whether the given JSON Schema, or any subschema
+// it contains, has a non-empty description or title. Only subschema keywords
+// are searched, so a property named "description" is a subschema rather than
+// documentation, and the values under enum, const, default and examples are
+// never mistaken for schemas. Boolean schemas carry no documentation.
+func schemaIsDocumented(schema any) bool {
+	schemaMap, ok := schema.(map[string]any)
+	if !ok {
+		return false
+	}
+	for _, keyword := range []string{"description", "title"} {
+		if text, ok := schemaMap[keyword].(string); ok && text != "" {
+			return true
+		}
+	}
+	for _, keyword := range subschemaMapKeywords {
+		if subschemas, ok := schemaMap[keyword].(map[string]any); ok {
+			for _, subschema := range subschemas {
+				if schemaIsDocumented(subschema) {
+					return true
+				}
+			}
+		}
+	}
+	for _, keyword := range subschemaArrayKeywords {
+		switch subschemas := schemaMap[keyword].(type) {
+		case []any:
+			if slices.ContainsFunc(subschemas, schemaIsDocumented) {
+				return true
+			}
+		case []map[string]any:
+			for _, subschema := range subschemas {
+				if schemaIsDocumented(subschema) {
+					return true
+				}
+			}
+		}
+	}
+	for _, keyword := range subschemaKeywords {
+		if schemaIsDocumented(schemaMap[keyword]) {
+			return true
+		}
+	}
+	return false
 }
 
 // convertToolChoice takes our generic genai.ToolConfig and translates its
