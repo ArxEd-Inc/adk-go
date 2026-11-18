@@ -103,6 +103,7 @@ func (m *Model) generate(ctx context.Context, params oairesponses.ResponseNewPar
 		}
 		llmResp := converters.Genai2LLMResponse(genaiResp)
 		attachMetadata(llmResp, resp)
+		attachCacheWrites(llmResp, resp.Usage, cacheWriteTTL(params))
 		attachFinishSignal(llmResp, resp, false)
 		yield(llmResp, nil)
 	}
@@ -256,6 +257,9 @@ func (m *Model) generateStream(ctx context.Context, params oairesponses.Response
 				trace.WithAttributes(attribute.String("error.type", errorType)))
 		}
 		finalizeStreamResponse(final, term)
+		if term.seen {
+			attachCacheWrites(final, term.resp.Usage, cacheWriteTTL(params))
+		}
 		yield(final, nil)
 	}
 }

@@ -22,6 +22,7 @@ import (
 	oairesponses "github.com/openai/openai-go/v3/responses"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/openai/internal/shared"
 )
 
@@ -318,20 +319,83 @@ func finishMessage(resp *oairesponses.Response, incompleteEvent bool) string {
 	return ""
 }
 
+// convertUsage maps the API's usage onto genai's, following genai's
+// conventions so a caller summing the fields counts each token once:
+// PromptTokenCount is every input token, cache reads and cache writes
+// included, as input_tokens is; CandidatesTokenCount is the answer alone,
+// since output_tokens already includes the reasoning ThoughtsTokenCount
+// reports. Cache writes, which genai has no field for, ride in CustomMetadata
+// (see attachCacheWrites).
 func convertUsage(usage oairesponses.ResponseUsage) *genai.GenerateContentResponseUsageMetadata {
+	answerTokens := max(usage.OutputTokens-usage.OutputTokensDetails.ReasoningTokens, 0)
 	return &genai.GenerateContentResponseUsageMetadata{
 		PromptTokenCount:        shared.SafeInt32(usage.InputTokens),
-		CandidatesTokenCount:    shared.SafeInt32(usage.OutputTokens),
+		CandidatesTokenCount:    shared.SafeInt32(answerTokens),
 		TotalTokenCount:         shared.SafeInt32(usage.TotalTokens),
 		CachedContentTokenCount: shared.SafeInt32(usage.InputTokensDetails.CachedTokens),
 		PromptTokensDetails: []*genai.ModalityTokenCount{
 			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.InputTokens)},
 		},
 		CandidatesTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.OutputTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(answerTokens)},
 		},
 		ThoughtsTokenCount: shared.SafeInt32(usage.OutputTokensDetails.ReasoningTokens),
 	}
+}
+
+// CustomMetadata keys under which a response reports the input tokens it
+// wrote to the prompt cache, by the TTL they were billed at.
+const (
+	CacheWriteInputTokensKey    = "openai_cache_write_input_tokens"
+	CacheWrite30mInputTokensKey = "openai_cache_write_30m_input_tokens"
+	CacheWrite12hInputTokensKey = "openai_cache_write_12h_input_tokens"
+)
+
+// attachCacheWrites records the input tokens a response wrote to the prompt
+// cache, when it wrote any. The API reports one total, so the tokens are
+// filed under the longest TTL any breakpoint of the request asked for (see
+// cacheWriteTTL): exact when every breakpoint shares a TTL, and otherwise
+// never an undercount of what the writes cost.
+func attachCacheWrites(resp *model.LLMResponse, usage oairesponses.ResponseUsage, ttl shared.CacheTTL) {
+	written := usage.InputTokensDetails.CacheWriteTokens
+	if resp == nil || written <= 0 {
+		return
+	}
+	if resp.CustomMetadata == nil {
+		resp.CustomMetadata = map[string]any{}
+	}
+	resp.CustomMetadata[CacheWriteInputTokensKey] = written
+	if ttl == shared.CacheTTL12h {
+		resp.CustomMetadata[CacheWrite12hInputTokensKey] = written
+	} else {
+		resp.CustomMetadata[CacheWrite30mInputTokensKey] = written
+	}
+}
+
+// cacheWriteTTL is the longest TTL a breakpoint of params asks for. The
+// implicit breakpoint and any explicit one without a TTL take the request's,
+// which this package leaves at the API's 30 minutes.
+func cacheWriteTTL(params oairesponses.ResponseNewParams) shared.CacheTTL {
+	for _, item := range params.Input.OfInputItemList {
+		if item.OfMessage == nil {
+			continue
+		}
+		for _, content := range item.OfMessage.Content.OfInputItemContentList {
+			var ttl string
+			switch {
+			case content.OfInputText != nil:
+				ttl = content.OfInputText.PromptCacheBreakpoint.Ttl
+			case content.OfInputImage != nil:
+				ttl = content.OfInputImage.PromptCacheBreakpoint.Ttl
+			case content.OfInputFile != nil:
+				ttl = content.OfInputFile.PromptCacheBreakpoint.Ttl
+			}
+			if shared.CacheTTL(ttl) == shared.CacheTTL12h {
+				return shared.CacheTTL12h
+			}
+		}
+	}
+	return shared.CacheTTL30m
 }
 
 // logprobsFor returns a response's logprobs only when they describe the text
