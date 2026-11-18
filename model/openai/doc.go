@@ -20,6 +20,16 @@
 // once openaimodel covers what it adds. To see what changed, diff this
 // directory against the tag's model/openaimodel.
 //
+// TODO: delete this package once model/openaimodel covers what it adds:
+// reasoning items carried across turns, efforts above high, store false,
+// usage that counts reasoning once and reports cache writes, caller-placed
+// prompt cache breakpoints, deferred tool loading, Files API document
+// references, MediaResolution mapped to detail, response schemas in tool
+// descriptions, typed in-stream errors, refusals as safety stops, unknown
+// output items skipped, every request streamed, and every thought marked for
+// other providers' packages. Each upstream tag pass checks this list and ports
+// openaimodel's fixes worth having.
+//
 // It implements the model.LLM interface against POST /v1/responses.
 //
 // Every top-level field of genai.GenerateContentConfig is translated, rejected
