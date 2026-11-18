@@ -62,6 +62,11 @@ var (
 	// ErrUnsupportedConfigField is returned when a generation config field has no equivalent on the selected API; the message names it.
 	ErrUnsupportedConfigField = errors.New("openai: unsupported generation config field")
 
+	// ErrRequestConversion marks a failure to convert a request into the
+	// Responses API's format, raised before any API call is made. Conversion is
+	// deterministic, so the same request fails the same way on every attempt.
+	ErrRequestConversion = errors.New("openai: failed to convert request")
+
 	// ErrRequestTooLarge is returned when a request would carry more inline
 	// media than FilesConfig.MaxInlineBytes allows. It is raised before the
 	// request is sent.

@@ -95,6 +95,7 @@ func TestSentinelsAliasTheInternalOnes(t *testing.T) {
 		"ErrNoTextOrToolContent":            {ErrNoTextOrToolContent, shared.ErrNoTextOrToolContent},
 		"ErrResponseFailed":                 {ErrResponseFailed, shared.ErrResponseFailed},
 		"ErrRequestTooLarge":                {ErrRequestTooLarge, shared.ErrRequestTooLarge},
+		"ErrRequestConversion":              {ErrRequestConversion, shared.ErrRequestConversion},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s is not the sentinel the endpoint packages return", name)
@@ -112,6 +113,9 @@ func TestSentinelsAliasTheInternalOnes(t *testing.T) {
 	}
 	if !errors.Is(got, ErrNoContents) {
 		t.Fatalf("err = %v, want the aliased %v to match", got, ErrNoContents)
+	}
+	if !errors.Is(got, ErrRequestConversion) {
+		t.Fatalf("err = %v, want a conversion failure to match %v", got, ErrRequestConversion)
 	}
 }
 

@@ -57,6 +57,12 @@ var (
 	ErrMediaOnAssistantTurn = shared.ErrMediaOnAssistantTurn
 	// ErrUnsupportedConfigField is returned when a generation config field has no equivalent on the selected API; the message names it.
 	ErrUnsupportedConfigField = shared.ErrUnsupportedConfigField
+	// ErrRequestConversion wraps every failure to convert a request into the
+	// Responses API's format, each raised before any API call. Conversion is
+	// deterministic, so a caller retrying failed calls should treat an error
+	// wrapping it as permanent. The sentinels above that describe a request
+	// still match the errors it wraps.
+	ErrRequestConversion = shared.ErrRequestConversion
 	// ErrRequestTooLarge is returned, before the request is sent, when it
 	// would carry more inline media than FilesConfig.MaxInlineBytes allows.
 	// IsRequestTooLargeError reports it.

@@ -100,7 +100,7 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 			}
 			params, err := buildParamsFor(m.name, req, m.opts, fileIDs)
 			if err != nil {
-				yield(nil, err)
+				yield(nil, fmt.Errorf("%w: %w", shared.ErrRequestConversion, err))
 				return
 			}
 			retry := false
