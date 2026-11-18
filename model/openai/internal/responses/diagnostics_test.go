@@ -54,16 +54,21 @@ func TestModel_GenerateStream_TerminalConversionDiagnostic(t *testing.T) {
 		wantCall   bool
 		wantFinish genai.FinishReason
 		stopEarly  bool
+		// wantSkipped lists the output item types the turn reports leaving
+		// out, which it records as an event of its own.
+		wantSkipped []string
 	}{
 		{
-			name:     "unsupported output retains streamed text",
-			events:   []string{evDelta1, completed("[" + message + "," + unsupported + "]")},
-			wantType: "unsupported_output_item", wantText: "hel",
+			name:        "unsupported output item is skipped",
+			events:      []string{evDelta1, completed("[" + message + "," + unsupported + "]")},
+			wantText:    "hello",
+			wantSkipped: []string{"private-output-type"},
 		},
 		{
-			name:     "server tool output prevents terminal conversion",
-			events:   []string{evDelta1, completed("[" + message + `,{"type":"web_search_call","id":"search_1","status":"completed"}]`)},
-			wantType: "unsupported_output_item", wantText: "hel",
+			name:        "server tool output is skipped",
+			events:      []string{evDelta1, completed("[" + message + `,{"type":"web_search_call","id":"search_1","status":"completed"}]`)},
+			wantText:    "hello",
+			wantSkipped: []string{"web_search_call"},
 		},
 		{
 			name:     "unsupported message content retains streamed text",
@@ -76,9 +81,10 @@ func TestModel_GenerateStream_TerminalConversionDiagnostic(t *testing.T) {
 			wantType: "invalid_function_call_arguments", wantText: "hel", wantCall: true,
 		},
 		{
-			name:     "later terminal does not duplicate diagnostic",
-			events:   []string{evDelta1, completed("[" + unsupported + "]"), evCompleted},
-			wantType: "unsupported_output_item", wantText: "hel",
+			name:        "later terminal does not replace the first",
+			events:      []string{evDelta1, completed("[" + unsupported + "]"), evCompleted},
+			wantText:    "hel",
+			wantSkipped: []string{"private-output-type"},
 		},
 		{
 			name:   "successful terminal conversion",
@@ -99,7 +105,7 @@ func TestModel_GenerateStream_TerminalConversionDiagnostic(t *testing.T) {
 		},
 		{
 			name:   "no aggregate returns conversion error",
-			events: []string{completed("[" + unsupported + "]")}, wantErr: shared.ErrUnsupportedOutputItemType,
+			events: []string{completed("[" + unsupported + "]")}, wantErr: shared.ErrNoTextOrToolContent,
 		},
 		{
 			name:   "invalid arguments without a streamed call return an error",
@@ -217,6 +223,16 @@ func TestModel_GenerateStream_TerminalConversionDiagnostic(t *testing.T) {
 						t.Error("fallback changed the span status")
 					}
 					events := spans[0].Events()
+					if tc.wantSkipped != nil {
+						if len(events) != 1 || events[0].Name != "openai.output_items_skipped" {
+							t.Fatalf("recorded events %v, want one naming the skipped items", events)
+						}
+						wantAttrs := []attribute.KeyValue{attribute.StringSlice("openai.output_item_types", tc.wantSkipped)}
+						if !slices.EqualFunc(events[0].Attributes, wantAttrs, func(a, b attribute.KeyValue) bool { return a.Key == b.Key && a.Value.Emit() == b.Value.Emit() }) {
+							t.Errorf("skipped-items attributes = %v, want %v", events[0].Attributes, wantAttrs)
+						}
+						return
+					}
 					if tc.wantType == "" {
 						if len(events) != 0 {
 							t.Errorf("recorded %d diagnostic events, want none", len(events))

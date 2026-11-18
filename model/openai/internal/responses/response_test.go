@@ -973,11 +973,11 @@ func TestConvertOutputItems(t *testing.T) {
 			wantErr: shared.ErrNoOutputItems,
 		},
 		{
-			name: "invalid type",
+			name: "unknown type alone converts to nothing",
 			items: []oairesponses.ResponseOutputItemUnion{
 				{Type: "invalid"},
 			},
-			wantErr: shared.ErrUnsupportedOutputItemType,
+			wantErr: shared.ErrNoTextOrToolContent,
 		},
 		{
 			name: "invalid message content type",

@@ -97,11 +97,13 @@ func (t *streamTranslator) process(evt oairesponses.ResponseStreamEventUnion) (*
 	case errorEvent:
 		// Generic stream errors are also returned.
 		// Same treatment as a failed response body: the text is the server's,
-		// so it is capped, and quoted rather than interpolated bare.
+		// so it is capped, and quoted rather than interpolated bare. The code
+		// travels on the ServerError, for a caller deciding whether to retry.
+		rendered := fmt.Errorf("openai stream error")
 		if msg := shared.ClipServerText(evt.Message); msg != "" {
-			return nil, fmt.Errorf("openai stream error: %q", msg)
+			rendered = fmt.Errorf("openai stream error: %q", msg)
 		}
-		return nil, fmt.Errorf("openai stream error")
+		return nil, shared.NewServerError(evt.Code, evt.Message, rendered)
 	case responseOutputItemAdded:
 		added := evt.AsResponseOutputItemAdded()
 		if added.Item.ID != "" && added.Item.CallID != "" {

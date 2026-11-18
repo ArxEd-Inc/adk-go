@@ -62,8 +62,20 @@
 //
 // A successful fallback from a response.completed conversion failure records
 // "openai.terminal_response_conversion_failed" on the active OpenTelemetry span
-// for unsupported output items, unsupported message content, or invalid
-// function-call arguments. The event contains only an "error.type" category.
+// for unsupported message content or invalid function-call arguments. The
+// event contains only an "error.type" category.
+//
+// An output item this package has no part for, such as a server-side tool's,
+// is left out of the turn rather than failing it. The final response lists
+// the types left out under [SkippedOutputItemTypesKey] in CustomMetadata, and
+// "openai.output_items_skipped" is recorded on the active span with the same
+// list.
+//
+// A refusal stays in the turn's content as text, and the final response is
+// marked as a safety stop: FinishReason and ErrorCode SAFETY, with the refusal
+// as ErrorMessage, as model/anthropic marks a refusal. A failure the server
+// reports inside an HTTP 200, an error event in the stream or a response whose
+// status is failed, is a [ServerError] carrying the server's error code.
 //
 // Model reasoning is reported to the caller as thought parts. Every request
 // asks for its reasoning encrypted, and a reasoning item's id and encrypted

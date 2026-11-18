@@ -91,7 +91,6 @@ func TestSentinelsAliasTheInternalOnes(t *testing.T) {
 		"ErrEmptyResponse":                  {ErrEmptyResponse, shared.ErrEmptyResponse},
 		"ErrNoOutputItems":                  {ErrNoOutputItems, shared.ErrNoOutputItems},
 		"ErrUnsupportedMessageContentType":  {ErrUnsupportedMessageContentType, shared.ErrUnsupportedMessageContentType},
-		"ErrUnsupportedOutputItemType":      {ErrUnsupportedOutputItemType, shared.ErrUnsupportedOutputItemType},
 		"ErrFunctionCallArgs":               {ErrFunctionCallArgs, shared.ErrFunctionCallArgs},
 		"ErrNoTextOrToolContent":            {ErrNoTextOrToolContent, shared.ErrNoTextOrToolContent},
 		"ErrResponseFailed":                 {ErrResponseFailed, shared.ErrResponseFailed},

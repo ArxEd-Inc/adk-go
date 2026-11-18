@@ -14,7 +14,10 @@
 
 package openai
 
-import "google.golang.org/adk/v2/model/openai/internal/shared"
+import (
+	"google.golang.org/adk/v2/model/openai/internal/responses"
+	"google.golang.org/adk/v2/model/openai/internal/shared"
+)
 
 // The sentinels are defined in the internal package the endpoint paths return
 // them from, and aliased here. Assignment preserves identity, so errors.Is is
@@ -62,8 +65,6 @@ var (
 	ErrNoOutputItems = shared.ErrNoOutputItems
 	// ErrUnsupportedMessageContentType is returned when an unsupported message content type is used.
 	ErrUnsupportedMessageContentType = shared.ErrUnsupportedMessageContentType
-	// ErrUnsupportedOutputItemType is returned when an unsupported output item type is used.
-	ErrUnsupportedOutputItemType = shared.ErrUnsupportedOutputItemType
 	// ErrFunctionCallArgs is returned when a function call's arguments are not a decodable JSON object.
 	ErrFunctionCallArgs = shared.ErrFunctionCallArgs
 	// ErrNoTextOrToolContent is returned when the response output does not contain text or tool content.
@@ -74,3 +75,14 @@ var (
 	// output that would otherwise have read as a turn.
 	ErrResponseFailed = shared.ErrResponseFailed
 )
+
+// ServerError is a failure the server reported after answering HTTP 200: an
+// error event in a stream, or a response whose own status is failed. Its Code
+// is the server's error code, such as "rate_limit_exceeded" or
+// "server_error", for a caller deciding whether to retry. A failed response's
+// ServerError also matches ErrResponseFailed with errors.Is.
+type ServerError = shared.ServerError
+
+// SkippedOutputItemTypesKey is the CustomMetadata key under which a turn lists
+// the types of the output items it left out, having no part for them.
+const SkippedOutputItemTypesKey = responses.SkippedOutputItemTypesKey

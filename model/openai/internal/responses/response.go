@@ -17,6 +17,7 @@ package responses
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	oairesponses "github.com/openai/openai-go/v3/responses"
@@ -77,6 +78,11 @@ func reportsFailure(resp *oairesponses.Response) bool {
 // forge. Neither is elided when the message appears to repeat it — saying a code
 // twice is cosmetic, dropping the one the caller needs is not.
 func failedResponseError(resp *oairesponses.Response) error {
+	return shared.NewServerError(string(resp.Error.Code), resp.Error.Message, renderFailedResponse(resp))
+}
+
+// renderFailedResponse is failedResponseError's text.
+func renderFailedResponse(resp *oairesponses.Response) error {
 	// Clipped, so a value of nothing but spaces contributes nothing rather than
 	// a label or separator with nothing after it.
 	msg := shared.ClipServerText(resp.Error.Message)
@@ -176,7 +182,9 @@ func convertOutputItems(modelName string, items []oairesponses.ResponseOutputIte
 				parts[first].ThoughtSignature = signature
 			}
 		default:
-			return nil, fmt.Errorf("%w: %q", shared.ErrUnsupportedOutputItemType, item.Type)
+			// An item this package has no part for, such as a server-side
+			// tool's, is left out rather than failing a turn the model
+			// answered; skippedOutputItemTypes names it to the caller.
 		}
 	}
 	if len(parts) == 0 {
@@ -465,4 +473,37 @@ func convertLogprobs(items []oairesponses.ResponseOutputItemUnion) *genai.Logpro
 		}
 	}
 	return res
+}
+
+// convertedOutputItemTypes are the output item types convertOutputItems turns
+// into parts.
+var convertedOutputItemTypes = map[string]bool{"message": true, "function_call": true, "reasoning": true}
+
+// skippedOutputItemTypes lists, in order and without repeats, the types of the
+// output items convertOutputItems leaves out.
+func skippedOutputItemTypes(items []oairesponses.ResponseOutputItemUnion) []string {
+	var skipped []string
+	for _, item := range items {
+		if !convertedOutputItemTypes[item.Type] && !slices.Contains(skipped, item.Type) {
+			skipped = append(skipped, item.Type)
+		}
+	}
+	return skipped
+}
+
+// refusalText is the text of every refusal a response's messages carry,
+// joined, or "" when the model refused nothing.
+func refusalText(items []oairesponses.ResponseOutputItemUnion) string {
+	var refusals []string
+	for _, item := range items {
+		if item.Type != "message" {
+			continue
+		}
+		for _, content := range item.Content {
+			if content.Type == "refusal" {
+				refusals = append(refusals, content.Refusal)
+			}
+		}
+	}
+	return strings.Join(refusals, " ")
 }

@@ -238,8 +238,6 @@ func (m *Model) generateStream(ctx context.Context, params oairesponses.Response
 		// caller. Classify them without retaining provider-controlled error text.
 		var errorType string
 		switch {
-		case errors.Is(terminalConversionErr, shared.ErrUnsupportedOutputItemType):
-			errorType = "unsupported_output_item"
 		case errors.Is(terminalConversionErr, shared.ErrUnsupportedMessageContentType):
 			errorType = "unsupported_message_content"
 		case errors.Is(terminalConversionErr, shared.ErrFunctionCallArgs):
@@ -252,6 +250,14 @@ func (m *Model) generateStream(ctx context.Context, params oairesponses.Response
 		finalizeStreamResponse(final, term)
 		if term.seen {
 			attachCacheWrites(final, term.resp.Usage, cacheWriteTTL(params))
+			if skipped := skippedOutputItemTypes(term.resp.Output); len(skipped) > 0 {
+				if final.CustomMetadata == nil {
+					final.CustomMetadata = map[string]any{}
+				}
+				final.CustomMetadata[SkippedOutputItemTypesKey] = skipped
+				trace.SpanFromContext(ctx).AddEvent("openai.output_items_skipped",
+					trace.WithAttributes(attribute.StringSlice("openai.output_item_types", skipped)))
+			}
 		}
 		yield(final, nil)
 	}
@@ -529,7 +535,27 @@ func finalizeStreamResponse(final *model.LLMResponse, term terminalEvent) {
 	final.FinishReason = finishReason(term.resp, term.incomplete)
 	final.LogprobsResult = logprobsFor(term.resp, shared.AnswerText(final.Content))
 	attachFinishSignal(final, term.resp, term.incomplete)
+	attachRefusal(final, term.resp)
 }
+
+// attachRefusal marks a turn in which the model refused as a safety stop,
+// with the refusal as its error, as model/anthropic marks Claude's refusals
+// and model/gemini a blocked prompt. The refusal stays in the content, where
+// it streamed: the error fields are what make a caller treat the turn as
+// declined rather than as an answer that happens to say no.
+func attachRefusal(resp *model.LLMResponse, openaiResp *oairesponses.Response) {
+	refusal := refusalText(openaiResp.Output)
+	if refusal == "" {
+		return
+	}
+	resp.FinishReason = genai.FinishReasonSafety
+	resp.ErrorCode = string(genai.FinishReasonSafety)
+	resp.ErrorMessage = "OpenAI refused the request: " + shared.ClipServerText(refusal)
+}
+
+// SkippedOutputItemTypesKey is the CustomMetadata key under which a turn lists
+// the types of the output items it left out, having no part for them.
+const SkippedOutputItemTypesKey = "openai_skipped_output_item_types"
 
 // FinishMessageKey is the CustomMetadata key a turn that ended badly reports
 // the provider's own account of why under; openai.FinishMessageKey, which
