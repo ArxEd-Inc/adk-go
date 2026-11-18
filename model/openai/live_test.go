@@ -17,6 +17,9 @@ package openai
 import (
 	"bytes"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"strings"
 	"testing"
@@ -34,8 +37,8 @@ type deferredEntry struct{}
 
 func (deferredEntry) DeferLoading() bool { return true }
 
-// TestLive runs one short tool-using conversation against the real API: a PDF
-// sent by file reference with a breakpoint after it, a system instruction with
+// TestLive runs one short tool-using conversation against the real API: an
+// image and a PDF sent by file reference with a breakpoint after them, a system instruction with
 // a breakpoint of its own, reasoning carried across tool calls, and a deferred
 // tool loaded by a function response. It costs a few cents, so it runs only
 // when both OPENAI_API_KEY and OPENAI_LIVE_TEST_MODEL are set; the second
@@ -64,10 +67,11 @@ func TestLive(t *testing.T) {
 	}
 	llm := newModel("https://api.openai.com/v1")
 
+	label := &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: liveTestPNG(t)}}
 	slip := &genai.Part{InlineData: &genai.Blob{MIMEType: "application/pdf", Data: liveTestPDF("Order 42 ships SKU A-17 from bin 9.")}}
 	MarkCacheBreakpoint(slip)
 	contents := []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{
-		slip, genai.NewPartFromText("Look order 42 up, then cancel it."),
+		label, slip, genai.NewPartFromText("Look order 42 up, then cancel it."),
 	}}}
 
 	// Turn 1: the model must call lookup_order.
@@ -228,4 +232,23 @@ func liveTestPDF(text string) []byte {
 	}
 	fmt.Fprintf(&pdf, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xref)
 	return pdf.Bytes()
+}
+
+// liveTestPNG returns a small striped image, for the image sent by file
+// reference.
+func liveTestPNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewGray(image.Rect(0, 0, 64, 64))
+	for y := range 64 {
+		for x := range 64 {
+			if (x/8)%2 == 0 {
+				img.SetGray(x, y, color.Gray{Y: 255})
+			}
+		}
+	}
+	var out bytes.Buffer
+	if err := png.Encode(&out, img); err != nil {
+		t.Fatalf("encode image: %v", err)
+	}
+	return out.Bytes()
 }
