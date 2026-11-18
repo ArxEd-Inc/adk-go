@@ -141,6 +141,7 @@ func TestHTTPOptionsHeadersNeverReachTheWire(t *testing.T) {
 				APIKey:     "real-key",
 				BaseURL:    server.URL + "/v1",
 				HTTPClient: server.Client(),
+				Options:    []option.RequestOption{blockingAsStream},
 			})
 			if err != nil {
 				t.Fatalf("NewModel() err = %v", err)
@@ -213,7 +214,7 @@ func TestNewModel_UsesTheConfiguredClient(t *testing.T) {
 			APIKey:     "test",
 			BaseURL:    server.URL + "/v1",
 			HTTPClient: client,
-			Options:    []option.RequestOption{option.WithHeader("X-Adk-Option", "set")},
+			Options:    []option.RequestOption{option.WithHeader("X-Adk-Option", "set"), blockingAsStream},
 		})
 		if err != nil {
 			t.Fatalf("NewModel() err = %v", err)

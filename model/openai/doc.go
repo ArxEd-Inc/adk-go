@@ -49,6 +49,13 @@
 //	            effect because this API never pauses a generation with
 //	            CONTINUATION
 //
+// Every request is streamed, whether or not the caller streams: a blocking
+// request holds one silent HTTP response open for as long as the model takes,
+// which at a high reasoning effort can outlast the idle timeouts between caller
+// and API. A caller that does not stream receives only the stream's final,
+// aggregated response, or an error wrapping [ErrEmptyResponse] when the stream
+// ends without one.
+//
 // Function tools are sent with strict parameter validation disabled, and that
 // is not configurable, so tool call arguments are best effort rather than
 // guaranteed to match the declared parameter schema.

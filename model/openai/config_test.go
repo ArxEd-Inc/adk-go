@@ -45,6 +45,7 @@ func sendAndCapture(t *testing.T, cfg Config, req *model.LLMRequest) map[string]
 	cfg.APIKey = "test"
 	cfg.BaseURL = server.URL + "/v1"
 	cfg.HTTPClient = server.Client()
+	cfg.Options = append(cfg.Options, blockingAsStream)
 	llm, err := NewModel(t.Context(), "gpt-test", &cfg)
 	if err != nil {
 		t.Fatalf("NewModel() err = %v", err)

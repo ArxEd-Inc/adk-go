@@ -62,7 +62,14 @@ type Options struct {
 func (m *Model) Name() string { return m.name }
 
 // GenerateContent converts a generic LLMRequest into an OpenAI-specific request,
-// then calls the OpenAI API. It handles both streaming and non-streaming responses.
+// then calls the OpenAI API.
+//
+// The request is streamed whether or not the caller streams. A blocking
+// request holds one HTTP response open, silent, for as long as the model
+// takes, which for a long output at a high reasoning effort runs past the
+// idle timeouts of the proxies between caller and API; a stream keeps it
+// alive. A caller that does not stream receives only the stream's final,
+// aggregated response.
 func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	if req == nil {
 		return shared.SingleErrorSequence(shared.ErrRequestNil)
@@ -71,41 +78,27 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 	if err != nil {
 		return shared.SingleErrorSequence(err)
 	}
-	timeout := shared.RequestTimeout(req.Config)
+	responses := m.generateStream(ctx, params, shared.RequestTimeout(req.Config))
 	if stream {
-		return m.generateStream(ctx, params, timeout)
+		return responses
 	}
-	return m.generate(ctx, params, timeout)
-}
-
-func (m *Model) generate(ctx context.Context, params oairesponses.ResponseNewParams, timeout time.Duration) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		// Shadowed, not reassigned: the closure captures ctx by reference, so
-		// assigning to it would leave the second range over this sequence
-		// starting from the deadline the first one already canceled.
-		ctx := ctx
-		// Bounds the call, retries included, and is released when the caller
-		// stops consuming.
-		if timeout > 0 {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, timeout)
-			defer cancel()
+		answered := false
+		for resp, err := range responses {
+			if err == nil && resp.Partial {
+				continue
+			}
+			answered = true
+			if !yield(resp, err) {
+				return
+			}
 		}
-		resp, err := m.client.Responses.New(ctx, params)
-		if err != nil {
-			yield(nil, fmt.Errorf("openai: call failed: %w", err))
-			return
+		if !answered {
+			// A streaming caller has the partial responses to go on; this one
+			// would be left with nothing and no reason, as when the server
+			// answers without a single stream event.
+			yield(nil, fmt.Errorf("%w: the stream ended without a response", shared.ErrEmptyResponse))
 		}
-		genaiResp, err := convertResponse(resp)
-		if err != nil {
-			yield(nil, err)
-			return
-		}
-		llmResp := converters.Genai2LLMResponse(genaiResp)
-		attachMetadata(llmResp, resp)
-		attachCacheWrites(llmResp, resp.Usage, cacheWriteTTL(params))
-		attachFinishSignal(llmResp, resp, false)
-		yield(llmResp, nil)
 	}
 }
 

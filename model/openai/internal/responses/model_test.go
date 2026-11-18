@@ -2511,7 +2511,7 @@ type testClientConfig struct {
 // newTestModel builds a Model from cfg. NewModel's own option handling is
 // tested in package openai, through the constructor callers use.
 func newTestModel(modelName string, cfg *testClientConfig) model.LLM {
-	opts := []option.RequestOption{option.WithAPIKey(cfg.APIKey), option.WithBaseURL(cfg.BaseURL)}
+	opts := []option.RequestOption{option.WithAPIKey(cfg.APIKey), option.WithBaseURL(cfg.BaseURL), blockingAsStream}
 	if cfg.HTTPClient != nil {
 		opts = append(opts, option.WithHTTPClient(cfg.HTTPClient))
 	}
