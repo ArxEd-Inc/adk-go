@@ -250,11 +250,16 @@ func (m *Model) generateStream(ctx context.Context, params oairesponses.Response
 			case final == nil && shared.IsEmptyOutput(err) &&
 				finishReason(term.resp, term.incomplete) == genai.FinishReasonMaxTokens:
 				// The output cap ended the turn before it produced anything.
-				// That is a turn cut short, reported as one, MAX_TOKENS on an
-				// empty turn, the same way a turn the cap cut after some output
-				// is, rather than as an error a caller would read as a failure
-				// to retry: the same request meets the same cap.
-				final = &model.LLMResponse{Content: &genai.Content{Role: string(genai.RoleModel)}}
+				// That is a turn cut short, reported as one, MAX_TOKENS,
+				// rather than as an error a caller would read as a failure to
+				// retry: the same request meets the same cap. The error fields
+				// name it too, since a turn with nothing to read is otherwise
+				// dropped by the ADK's flow before a caller sees why it ended.
+				final = &model.LLMResponse{
+					Content:      &genai.Content{Role: string(genai.RoleModel)},
+					ErrorCode:    string(genai.FinishReasonMaxTokens),
+					ErrorMessage: "the output cap ended the turn before any output",
+				}
 			default:
 				// Blocking fails the call on unusable output; match it rather
 				// than pass an empty turn off as a successful one.

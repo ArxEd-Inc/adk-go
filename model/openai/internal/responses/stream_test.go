@@ -213,8 +213,8 @@ func TestStreamTranslator_ResponseFailed_PathsAgree(t *testing.T) {
 }
 
 // TestModel_GenerateStream_CapStopWithNothingIsATruncatedTurn pins that a turn
-// the output cap ended before any output reports MAX_TOKENS on an empty turn,
-// as a turn cut after some output does, rather than an error.
+// the output cap ended before any output reports MAX_TOKENS, rather than an
+// error, with the error fields naming it so the ADK's flow keeps the turn.
 func TestModel_GenerateStream_CapStopWithNothingIsATruncatedTurn(t *testing.T) {
 	responses, err := runStream(t,
 		`{"type":"response.incomplete","response":{"id":"r","model":"m","status":"incomplete",`+
@@ -223,7 +223,8 @@ func TestModel_GenerateStream_CapStopWithNothingIsATruncatedTurn(t *testing.T) {
 		t.Fatalf("runStream() err = %v, want a truncated turn", err)
 	}
 	final := responses[len(responses)-1]
-	if final.FinishReason != genai.FinishReasonMaxTokens || !final.TurnComplete || final.ErrorCode != "" {
-		t.Errorf("final = %+v, want MAX_TOKENS, complete, with no error code", final)
+	if final.FinishReason != genai.FinishReasonMaxTokens || !final.TurnComplete ||
+		final.ErrorCode != string(genai.FinishReasonMaxTokens) {
+		t.Errorf("final = %+v, want MAX_TOKENS, complete, with MAX_TOKENS as its error code", final)
 	}
 }
