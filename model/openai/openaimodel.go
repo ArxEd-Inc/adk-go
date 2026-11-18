@@ -16,6 +16,8 @@ package openai
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 
@@ -68,6 +70,11 @@ type Config struct {
 	// A name the request does not defer is skipped, and the key is left out
 	// of the output the model reads. Empty (the default) loads nothing.
 	ToolReferencesResponseKey string
+
+	// Files, when set, sends the request's inline PDFs and images as Files
+	// API references rather than base64 (see FilesConfig). Nil (the default)
+	// sends every document inline.
+	Files *FilesConfig
 }
 
 // ErrAPIKeyRequired is returned by NewModel when Config.APIKey is empty.
@@ -110,11 +117,19 @@ func NewModel(_ context.Context, modelName string, cfg *Config) (model.LLM, erro
 	}
 	opts = append(opts, cfg.Options...)
 	client := openaisdk.NewClient(opts...)
-	return responses.New(&client, modelName, responses.Options{
+	identity := sha256.Sum256([]byte(cfg.APIKey + "\x00" + cfg.BaseURL))
+	llm, err := responses.New(&client, modelName, responses.Options{
 		Effort:           cfg.Effort,
 		DefaultMaxTokens: int64(cfg.DefaultMaxTokens),
 		PromptCaching:    cfg.PromptCaching,
 
 		ToolReferencesResponseKey: cfg.ToolReferencesResponseKey,
-	}), nil
+
+		Files:         cfg.Files,
+		FilesIdentity: hex.EncodeToString(identity[:8]),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return llm, nil
 }

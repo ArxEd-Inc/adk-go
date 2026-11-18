@@ -56,6 +56,12 @@
 // loads it right after that response, so the tools array, and the cached
 // prefix behind it, stay unchanged as the set grows.
 //
+// With [Config.Files] set, a request's inline PDFs and images are uploaded to
+// the Files API once per process and sent by file ID, each upload expiring
+// after [FilesConfig] ExpiresIn (24 hours by default). A document whose upload
+// fails is sent inline. A request the API refuses as referencing a file it
+// cannot find is made once more with the files uploaded afresh.
+//
 // Every request is streamed, whether or not the caller streams: a blocking
 // request holds one silent HTTP response open for as long as the model takes,
 // which at a high reasoning effort can outlast the idle timeouts between caller

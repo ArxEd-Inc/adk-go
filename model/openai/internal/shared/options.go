@@ -15,6 +15,8 @@
 package shared
 
 import (
+	"time"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
@@ -124,4 +126,31 @@ func ToolReferenceNames(response map[string]any, key string) ([]string, bool) {
 	default:
 		return nil, false
 	}
+}
+
+// FilesConfig configures sending a request's inline PDFs and images as Files
+// API references instead of base64. Each distinct document (by content and
+// MIME type) is uploaded once per process and API key, and reused while its
+// file has at least ReuseMargin of life left; concurrent requests needing the
+// same document share one upload. Upload state lives in memory only: another
+// process uploads again, which costs the upload and nothing else. A document
+// whose upload fails is sent inline, as it would be without this config.
+type FilesConfig struct {
+	// ExpiresIn is how long each uploaded file lives before the Files API
+	// deletes it. Defaults to 24 hours when zero; must lie between one hour
+	// and thirty days, the range the API accepts.
+	ExpiresIn time.Duration
+
+	// ReuseMargin is the least remaining life an uploaded file must have to be
+	// referenced again, so a request never references a file that expires
+	// before the request is served. Defaults to one hour when zero; must be
+	// shorter than ExpiresIn.
+	ReuseMargin time.Duration
+
+	// MaxInlineBytes caps the raw bytes of media a request may still carry
+	// inline after resolution: documents whose upload failed and media of a
+	// type no reference stands in for. A request over the cap fails with an
+	// error wrapping ErrRequestTooLarge before it is sent, rather than with a
+	// body the API would refuse. Zero means no cap.
+	MaxInlineBytes int
 }

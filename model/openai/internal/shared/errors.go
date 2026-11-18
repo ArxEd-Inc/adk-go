@@ -62,6 +62,11 @@ var (
 	// ErrUnsupportedConfigField is returned when a generation config field has no equivalent on the selected API; the message names it.
 	ErrUnsupportedConfigField = errors.New("openai: unsupported generation config field")
 
+	// ErrRequestTooLarge is returned when a request would carry more inline
+	// media than FilesConfig.MaxInlineBytes allows. It is raised before the
+	// request is sent.
+	ErrRequestTooLarge = errors.New("openai: request carries more inline media than allowed")
+
 	// ErrEmptyJSONSchema is returned when an empty JSON schema is provided.
 	ErrEmptyJSONSchema = errors.New("openai: empty json schema")
 	// ErrEmptyResponse is returned when the OpenAI API returns an empty response.

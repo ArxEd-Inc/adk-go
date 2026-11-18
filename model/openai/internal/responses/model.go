@@ -40,6 +40,10 @@ type Model struct {
 	client *openai.Client
 	name   string
 	opts   Options
+
+	// files resolves inline documents to Files API references; nil sends them
+	// inline.
+	files *filesResolver
 }
 
 // Options carries the model-wide settings openai.Config translates into, each
@@ -59,6 +63,14 @@ type Options struct {
 	// ToolReferencesResponseKey names the function-response key under which a
 	// tool lists deferred tools to make callable, or "" for none.
 	ToolReferencesResponseKey string
+
+	// Files, when set, sends inline documents as Files API references; nil
+	// sends every document inline.
+	Files *shared.FilesConfig
+
+	// FilesIdentity distinguishes the API key and base URL uploads are made
+	// with, so models of different projects never share a file ID.
+	FilesIdentity string
 }
 
 // Name returns the model name a request is sent with when it does not name
@@ -78,32 +90,64 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 	if req == nil {
 		return shared.SingleErrorSequence(shared.ErrRequestNil)
 	}
-	params, err := buildParamsWith(m.name, req, m.opts)
-	if err != nil {
-		return shared.SingleErrorSequence(err)
-	}
-	responses := m.generateStream(ctx, params, shared.RequestTimeout(req.Config))
-	if stream {
-		return responses
-	}
 	return func(yield func(*model.LLMResponse, error) bool) {
 		answered := false
-		for resp, err := range responses {
-			if err == nil && resp.Partial {
-				continue
-			}
-			answered = true
-			if !yield(resp, err) {
+		for attempt := 0; ; attempt++ {
+			fileIDs, err := m.resolveFiles(ctx, req)
+			if err != nil {
+				yield(nil, err)
 				return
 			}
+			params, err := buildParamsFor(m.name, req, m.opts, fileIDs)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			retry := false
+			for resp, err := range m.generateStream(ctx, params, shared.RequestTimeout(req.Config)) {
+				if err != nil && !answered && attempt == 0 && m.shouldReuploadFiles(err, fileIDs) {
+					// Nothing reached the caller yet, so the attempt can be
+					// made again with the files uploaded afresh.
+					m.files.forget(fileIDs)
+					retry = true
+					break
+				}
+				if err == nil && resp.Partial && !stream {
+					continue
+				}
+				answered = true
+				if !yield(resp, err) {
+					return
+				}
+			}
+			if !retry {
+				break
+			}
 		}
-		if !answered {
+		if !answered && !stream {
 			// A streaming caller has the partial responses to go on; this one
 			// would be left with nothing and no reason, as when the server
 			// answers without a single stream event.
 			yield(nil, fmt.Errorf("%w: the stream ended without a response", shared.ErrEmptyResponse))
 		}
 	}
+}
+
+// resolveFiles returns the request's Files API references, or nil when the
+// model sends documents inline.
+func (m *Model) resolveFiles(ctx context.Context, req *model.LLMRequest) (map[*genai.Blob]string, error) {
+	if m.files == nil {
+		return nil, nil
+	}
+	return m.files.resolve(ctx, req)
+}
+
+// shouldReuploadFiles reports whether a failed attempt that referenced the
+// given files should be made once more with fresh uploads: the API refused it
+// as referring to a file it cannot find, which a file deleted before its
+// expiry causes.
+func (m *Model) shouldReuploadFiles(err error, fileIDs map[*genai.Blob]string) bool {
+	return m.files != nil && len(fileIDs) > 0 && isMissingFileError(err)
 }
 
 func (m *Model) generateStream(ctx context.Context, params oairesponses.ResponseNewParams, timeout time.Duration) iter.Seq2[*model.LLMResponse, error] {
@@ -619,7 +663,15 @@ func attachMetadata(resp *model.LLMResponse, openaiResp *oairesponses.Response) 
 }
 
 // New returns a Model talking to the Responses API as modelName, applying
-// opts to every request.
-func New(client *openai.Client, modelName string, opts Options) *Model {
-	return &Model{client: client, name: modelName, opts: opts}
+// opts to every request, or an error when opts.Files is invalid.
+func New(client *openai.Client, modelName string, opts Options) (*Model, error) {
+	m := &Model{client: client, name: modelName, opts: opts}
+	if opts.Files != nil {
+		files, err := newFilesResolver(*opts.Files, client, opts.FilesIdentity)
+		if err != nil {
+			return nil, err
+		}
+		m.files = files
+	}
+	return m, nil
 }

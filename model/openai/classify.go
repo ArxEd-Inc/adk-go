@@ -32,9 +32,13 @@ func IsContextWindowError(err error) bool {
 	return errorCode(err) == contextLengthExceededCode
 }
 
-// IsRequestTooLargeError reports whether err is a request refused for the size
-// of its body, before the model saw it.
+// IsRequestTooLargeError reports whether err is a request refused for its
+// size before the model saw it: by this package, for carrying more inline
+// media than FilesConfig.MaxInlineBytes allows, or by the API.
 func IsRequestTooLargeError(err error) bool {
+	if errors.Is(err, ErrRequestTooLarge) {
+		return true
+	}
 	apiErr, ok := errors.AsType[*openaisdk.Error](err)
 	return ok && apiErr.StatusCode == http.StatusRequestEntityTooLarge
 }

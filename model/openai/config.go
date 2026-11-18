@@ -74,3 +74,11 @@ func MarkCacheBreakpoint(part *genai.Part) {
 func IsCacheBreakpointMarked(part *genai.Part) bool {
 	return shared.IsCacheBreakpointMarked(part)
 }
+
+// FilesConfig configures sending a request's inline PDFs and images as Files
+// API references instead of base64 (see Config.Files). Every upload expires,
+// after FilesConfig.ExpiresIn, so no document outlives its use by more than
+// that; files are uploaded with the user_data purpose. A reference carries a
+// document in a few dozen bytes, so a conversation's documents are not resent
+// in full on every request.
+type FilesConfig = shared.FilesConfig

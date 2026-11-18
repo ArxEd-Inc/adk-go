@@ -42,6 +42,12 @@ func buildParams(modelName string, req *model.LLMRequest) (oairesponses.Response
 // buildParamsWith is buildParams applying the model-wide options a Model
 // carries.
 func buildParamsWith(modelName string, req *model.LLMRequest, opts Options) (oairesponses.ResponseNewParams, error) {
+	return buildParamsFor(modelName, req, opts, nil)
+}
+
+// buildParamsFor is buildParamsWith sending each inline document with an entry
+// in fileIDs as a reference to that file.
+func buildParamsFor(modelName string, req *model.LLMRequest, opts Options, fileIDs map[*genai.Blob]string) (oairesponses.ResponseNewParams, error) {
 	if req == nil {
 		return oairesponses.ResponseNewParams{}, shared.ErrRequestNil
 	}
@@ -68,6 +74,7 @@ func buildParamsWith(modelName string, req *model.LLMRequest, opts Options) (oai
 	contentOpts := contentOptions{
 		modelName:         string(params.Model),
 		mediaResolution:   requestMediaResolution(req),
+		fileIDs:           fileIDs,
 		toolReferencesKey: opts.ToolReferencesResponseKey,
 		deferredTools:     deferred,
 	}
@@ -187,6 +194,10 @@ type contentOptions struct {
 	// mediaResolution is the request's MediaResolution, the detail of media
 	// whose part sets none.
 	mediaResolution genai.MediaResolution
+
+	// fileIDs maps an inline document's blob to the uploaded file that stands
+	// in for it; a blob with no entry is sent inline.
+	fileIDs map[*genai.Blob]string
 
 	// toolReferencesKey names the function-response key under which a tool
 	// lists tools to make callable, or "" for none. Each listed tool the
@@ -353,6 +364,10 @@ func convertContentsWith(contents []*genai.Content, opts contentOptions) (oaires
 			// place ahead of the image it introduces, and before the call
 			// switch below, whose flush has to carry the media out with it.
 			detail := mediaDetail(part.MediaResolution, opts.mediaResolution)
+			if id, ok := opts.fileIDs[part.InlineData]; ok && part.InlineData != nil {
+				// ClassifyMedia reports inline data first, so it is media[0].
+				media[0].Source, media[0].FileID, media[0].Data = shared.MediaSourceFileID, id, nil
+			}
 			for _, m := range media {
 				buffered = append(buffered, bufferedContent{media: &m, detail: detail})
 			}

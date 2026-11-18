@@ -57,6 +57,10 @@ var (
 	ErrMediaOnAssistantTurn = shared.ErrMediaOnAssistantTurn
 	// ErrUnsupportedConfigField is returned when a generation config field has no equivalent on the selected API; the message names it.
 	ErrUnsupportedConfigField = shared.ErrUnsupportedConfigField
+	// ErrRequestTooLarge is returned, before the request is sent, when it
+	// would carry more inline media than FilesConfig.MaxInlineBytes allows.
+	// IsRequestTooLargeError reports it.
+	ErrRequestTooLarge = shared.ErrRequestTooLarge
 	// ErrEmptyJSONSchema is returned when an empty JSON schema is provided.
 	ErrEmptyJSONSchema = shared.ErrEmptyJSONSchema
 	// ErrEmptyResponse is returned when the OpenAI API returns an empty response.

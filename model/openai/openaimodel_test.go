@@ -94,6 +94,7 @@ func TestSentinelsAliasTheInternalOnes(t *testing.T) {
 		"ErrFunctionCallArgs":               {ErrFunctionCallArgs, shared.ErrFunctionCallArgs},
 		"ErrNoTextOrToolContent":            {ErrNoTextOrToolContent, shared.ErrNoTextOrToolContent},
 		"ErrResponseFailed":                 {ErrResponseFailed, shared.ErrResponseFailed},
+		"ErrRequestTooLarge":                {ErrRequestTooLarge, shared.ErrRequestTooLarge},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s is not the sentinel the endpoint packages return", name)
