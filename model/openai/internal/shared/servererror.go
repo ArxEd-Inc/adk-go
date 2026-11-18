@@ -14,6 +14,8 @@
 
 package shared
 
+import "fmt"
+
 // ServerError is a failure the server reported after answering HTTP 200: an
 // error event in a stream, or a response whose own status is failed. Code is
 // the server's error code, such as "rate_limit_exceeded" or "server_error",
@@ -37,6 +39,15 @@ func NewServerError(code, message string, rendered error) *ServerError {
 	return &ServerError{Code: ClipServerText(code), Message: ClipServerText(message), rendered: rendered}
 }
 
-func (e *ServerError) Error() string { return e.rendered.Error() }
+// Error is the rendered error's text, or, for a ServerError built as a
+// literal, as a caller's test builds one, its code and message.
+func (e *ServerError) Error() string {
+	if e.rendered == nil {
+		return fmt.Sprintf("openai: server error (code %q): %q", e.Code, e.Message)
+	}
+	return e.rendered.Error()
+}
 
+// Unwrap returns the rendered error, which a failed response's wraps
+// ErrResponseFailed.
 func (e *ServerError) Unwrap() error { return e.rendered }

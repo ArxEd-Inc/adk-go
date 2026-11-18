@@ -153,3 +153,13 @@ func TestUnknownOutputItem_IsSkippedAndListed(t *testing.T) {
 		t.Errorf("CustomMetadata[%q] = %v, want [web_search_call]", SkippedOutputItemTypesKey, final.CustomMetadata[SkippedOutputItemTypesKey])
 	}
 }
+
+func TestServerError_LiteralRenders(t *testing.T) {
+	err := &ServerError{Code: "server_error", Message: "The server had an error."}
+	if got := err.Error(); got != `openai: server error (code "server_error"): "The server had an error."` {
+		t.Errorf("Error() = %q", got)
+	}
+	if errors.Unwrap(err) != nil {
+		t.Errorf("Unwrap() = %v, want nil", errors.Unwrap(err))
+	}
+}
