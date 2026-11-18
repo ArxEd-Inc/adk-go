@@ -49,6 +49,12 @@
 //	            effect because this API never pauses a generation with
 //	            CONTINUATION
 //
+// A tool whose dispatch entry implements [DeferredLoadingTool] and defers is
+// left out of the request's tools until a function response names it under
+// [Config.ToolReferencesResponseKey]; an additional_tools input item then
+// loads it right after that response, so the tools array, and the cached
+// prefix behind it, stay unchanged as the set grows.
+//
 // Every request is streamed, whether or not the caller streams: a blocking
 // request holds one silent HTTP response open for as long as the model takes,
 // which at a high reasoning effort can outlast the idle timeouts between caller

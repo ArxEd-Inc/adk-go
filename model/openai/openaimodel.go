@@ -58,6 +58,16 @@ type Config struct {
 	// PromptCaching places explicit prompt cache breakpoints on top of the
 	// API's implicit one (see PromptCachingConfig). Nil places none.
 	PromptCaching *PromptCachingConfig
+
+	// ToolReferencesResponseKey names a function-response key under which a
+	// tool returns a list of tool names to make callable. Each name of a tool
+	// the request defers (see DeferredLoadingTool) is loaded by an
+	// additional_tools input item right after the first function output that
+	// names it, so the request's tools stay unchanged, the tool set grows only
+	// at the end of the conversation, and the prompt cache's prefix survives.
+	// A name the request does not defer is skipped, and the key is left out
+	// of the output the model reads. Empty (the default) loads nothing.
+	ToolReferencesResponseKey string
 }
 
 // ErrAPIKeyRequired is returned by NewModel when Config.APIKey is empty.
@@ -104,5 +114,7 @@ func NewModel(_ context.Context, modelName string, cfg *Config) (model.LLM, erro
 		Effort:           cfg.Effort,
 		DefaultMaxTokens: int64(cfg.DefaultMaxTokens),
 		PromptCaching:    cfg.PromptCaching,
+
+		ToolReferencesResponseKey: cfg.ToolReferencesResponseKey,
 	}), nil
 }

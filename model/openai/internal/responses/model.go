@@ -55,6 +55,10 @@ type Options struct {
 
 	// PromptCaching places explicit prompt cache breakpoints; nil places none.
 	PromptCaching *shared.PromptCachingConfig
+
+	// ToolReferencesResponseKey names the function-response key under which a
+	// tool lists deferred tools to make callable, or "" for none.
+	ToolReferencesResponseKey string
 }
 
 // Name returns the model name a request is sent with when it does not name

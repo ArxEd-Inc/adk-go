@@ -57,7 +57,19 @@ func buildParamsWith(modelName string, req *model.LLMRequest, opts Options) (oai
 		params.Model = oaishared.ResponsesModel(req.Model)
 	}
 
-	contentOpts := contentOptions{modelName: string(params.Model)}
+	// Tools convert first: a function response can load only the tools this
+	// request defers.
+	tools, err := convertTools(req.Config)
+	if err != nil {
+		return oairesponses.ResponseNewParams{}, err
+	}
+	declared, deferred := splitDeferredTools(req, tools)
+
+	contentOpts := contentOptions{
+		modelName:         string(params.Model),
+		toolReferencesKey: opts.ToolReferencesResponseKey,
+		deferredTools:     deferred,
+	}
 	if opts.PromptCaching != nil && opts.PromptCaching.MarkedPart != nil {
 		contentOpts.markedPart = lastMarkedPart(req.Contents)
 		contentOpts.markedPartBreakpoint = opts.PromptCaching.MarkedPart
@@ -88,13 +100,8 @@ func buildParamsWith(modelName string, req *model.LLMRequest, opts Options) (oai
 		return oairesponses.ResponseNewParams{}, err
 	}
 
-	// Convert any specified tools into the OpenAI tool format.
-	tools, err := convertTools(req.Config)
-	if err != nil {
-		return oairesponses.ResponseNewParams{}, err
-	}
-	if len(tools) > 0 {
-		params.Tools = tools
+	if len(declared) > 0 {
+		params.Tools = declared
 	}
 
 	// Handle tool choice configuration, if provided.
@@ -146,9 +153,39 @@ func moveInstructionsToDeveloperMessage(params *oairesponses.ResponseNewParams, 
 	params.Instructions = param.Opt[string]{}
 }
 
+// splitDeferredTools separates the tools the request declares from those its
+// dispatch entries defer, which are keyed by name for a function response to
+// load (see contentOptions.deferredTools).
+func splitDeferredTools(req *model.LLMRequest, tools []oairesponses.ToolUnionParam) ([]oairesponses.ToolUnionParam, map[string]oairesponses.ToolUnionParam) {
+	var declared []oairesponses.ToolUnionParam
+	var deferred map[string]oairesponses.ToolUnionParam
+	for _, tool := range tools {
+		if tool.OfFunction != nil && shared.IsToolLoadingDeferred(req, tool.OfFunction.Name) {
+			if deferred == nil {
+				deferred = map[string]oairesponses.ToolUnionParam{}
+			}
+			deferred[tool.OfFunction.Name] = tool
+			continue
+		}
+		declared = append(declared, tool)
+	}
+	return declared, deferred
+}
+
 // contentOptions configures convertContentsWith. The zero value places no
-// breakpoint.
+// breakpoint and loads no tool.
 type contentOptions struct {
+	// toolReferencesKey names the function-response key under which a tool
+	// lists tools to make callable, or "" for none. Each listed tool the
+	// request defers is loaded by an additional_tools item right after the
+	// first function output that lists it, so the tool set grows only at the
+	// end of the conversation and the prompt cache's prefix survives. The key
+	// is left out of the output the model reads.
+	toolReferencesKey string
+	// deferredTools holds the definitions of the tools the request defers, by
+	// name.
+	deferredTools map[string]oairesponses.ToolUnionParam
+
 	// modelName is the model the request goes to. A reasoning item is sent
 	// back only to the model that produced it.
 	modelName string
@@ -183,6 +220,7 @@ func lastMarkedPart(contents []*genai.Content) *genai.Part {
 func convertContentsWith(contents []*genai.Content, opts contentOptions) (oairesponses.ResponseInputParam, bool, error) {
 	var (
 		items            oairesponses.ResponseInputParam
+		loaded           = map[string]bool{}
 		tracker          shared.CallTracker
 		buffered         []bufferedContent
 		droppedReasoning bool
@@ -326,11 +364,17 @@ func convertContentsWith(contents []*genai.Content, opts contentOptions) (oaires
 				if err := flushText(); err != nil {
 					return nil, false, err
 				}
-				respParam, err := newFunctionResponse(&tracker, part.FunctionResponse)
+				response, references := splitToolReferences(part.FunctionResponse, opts.toolReferencesKey)
+				respParam, err := newFunctionResponse(&tracker, response)
 				if err != nil {
 					return nil, false, err
 				}
 				items = append(items, oairesponses.ResponseInputItemUnionParam{OfFunctionCallOutput: respParam})
+				if load := toolsToLoad(references, opts.deferredTools, loaded); len(load) > 0 {
+					items = append(items, oairesponses.ResponseInputItemUnionParam{
+						OfAdditionalTools: &oairesponses.ResponseInputItemAdditionalToolsParam{Tools: load},
+					})
+				}
 			case !sendText && codeText == "" && len(media) == 0 && !shared.ReplayedReasoning(part):
 				// Nothing in the part reaches the request. It keeps the
 				// unsupported-content-part prefix the single message used
@@ -345,6 +389,41 @@ func convertContentsWith(contents []*genai.Content, opts contentOptions) (oaires
 	}
 
 	return items, droppedReasoning, nil
+}
+
+// splitToolReferences returns a function response without the tool names it
+// lists under key, and those names. A response listing none under key comes
+// back as it is.
+func splitToolReferences(resp *genai.FunctionResponse, key string) (*genai.FunctionResponse, []string) {
+	names, ok := shared.ToolReferenceNames(resp.Response, key)
+	if !ok {
+		return resp, nil
+	}
+	stripped := *resp
+	stripped.Response = make(map[string]any, len(resp.Response)-1)
+	for k, v := range resp.Response {
+		if k != key {
+			stripped.Response[k] = v
+		}
+	}
+	return &stripped, names
+}
+
+// toolsToLoad returns the definitions of the deferred tools names lists that
+// no earlier function response loaded, in the order listed, and records them
+// in loaded. A name the request does not defer is skipped: it is declared
+// already, or not a tool at all, and the API refuses a second definition.
+func toolsToLoad(names []string, deferred map[string]oairesponses.ToolUnionParam, loaded map[string]bool) []oairesponses.ToolUnionParam {
+	var load []oairesponses.ToolUnionParam
+	for _, name := range names {
+		tool, ok := deferred[name]
+		if !ok || loaded[name] {
+			continue
+		}
+		loaded[name] = true
+		load = append(load, tool)
+	}
+	return load
 }
 
 // bufferedContent is one piece of a message, held in the order it arrived:

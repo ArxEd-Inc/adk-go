@@ -14,7 +14,11 @@
 
 package shared
 
-import "google.golang.org/genai"
+import (
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/model"
+)
 
 // CacheTTL is the minimum lifetime of a prompt cache breakpoint, as the
 // Responses API's prompt_cache_breakpoint.ttl takes it.
@@ -72,4 +76,52 @@ func IsCacheBreakpointMarked(part *genai.Part) bool {
 	}
 	marked, ok := part.PartMetadata[PartCacheBreakpointMetadataKey].(bool)
 	return ok && marked
+}
+
+// DeferredLoadingTool is implemented by a request's dispatch entry (a value of
+// model.LLMRequest.Tools, keyed by the tool's name) to keep the tool's
+// declaration out of the request's tools until a function response names it
+// (see the Responses converter's tool references). The signal rides on the
+// dispatch entry rather than on the declaration, which is left as the tool
+// built it.
+type DeferredLoadingTool interface {
+	// DeferLoading reports whether the tool's declaration is deferred.
+	DeferLoading() bool
+}
+
+// IsToolLoadingDeferred reports whether the request's dispatch entry for the
+// named tool implements DeferredLoadingTool and defers; nil-safe.
+func IsToolLoadingDeferred(req *model.LLMRequest, name string) bool {
+	if req == nil {
+		return false
+	}
+	entry, ok := req.Tools[name].(DeferredLoadingTool)
+	return ok && entry.DeferLoading()
+}
+
+// ToolReferenceNames returns the tool names a function response lists under
+// key, reporting false when key is empty, absent from the response, or holds
+// anything but a list of strings: a []string as a tool returns it, or a []any
+// of strings as it reads back from a session store that round-trips the
+// response through JSON.
+func ToolReferenceNames(response map[string]any, key string) ([]string, bool) {
+	if key == "" {
+		return nil, false
+	}
+	switch value := response[key].(type) {
+	case []string:
+		return value, true
+	case []any:
+		names := make([]string, 0, len(value))
+		for _, element := range value {
+			name, ok := element.(string)
+			if !ok {
+				return nil, false
+			}
+			names = append(names, name)
+		}
+		return names, true
+	default:
+		return nil, false
+	}
 }
