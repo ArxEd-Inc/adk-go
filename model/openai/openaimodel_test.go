@@ -41,7 +41,7 @@ func TestNewModel_TalksToResponses(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 
-	llm, err := NewModel(t.Context(), "gpt-4o-mini", &ClientConfig{
+	llm, err := NewModel(t.Context(), "gpt-4o-mini", &Config{
 		APIKey:     "test",
 		BaseURL:    server.URL + "/v1",
 		HTTPClient: server.Client(),
@@ -60,7 +60,7 @@ func TestNewModel_TalksToResponses(t *testing.T) {
 }
 
 func TestNewModel_RequiresModelName(t *testing.T) {
-	if _, err := NewModel(t.Context(), "", &ClientConfig{APIKey: "k"}); !errors.Is(err, ErrModelNameRequired) {
+	if _, err := NewModel(t.Context(), "", &Config{APIKey: "k"}); !errors.Is(err, ErrModelNameRequired) {
 		t.Fatalf("err = %v, want %v", err, ErrModelNameRequired)
 	}
 }
@@ -71,7 +71,6 @@ func TestNewModel_RequiresModelName(t *testing.T) {
 func TestSentinelsAliasTheInternalOnes(t *testing.T) {
 	for name, pair := range map[string][2]error{
 		"ErrModelNameRequired":              {ErrModelNameRequired, shared.ErrModelNameRequired},
-		"ErrUnsupportedAPI":                 {ErrUnsupportedAPI, shared.ErrUnsupportedAPI},
 		"ErrNoChoices":                      {ErrNoChoices, shared.ErrNoChoices},
 		"ErrRequestNil":                     {ErrRequestNil, shared.ErrRequestNil},
 		"ErrNoContents":                     {ErrNoContents, shared.ErrNoContents},
@@ -103,7 +102,7 @@ func TestSentinelsAliasTheInternalOnes(t *testing.T) {
 	}
 
 	// And end to end, through an error an endpoint package actually built.
-	llm, err := NewModel(t.Context(), "m", &ClientConfig{APIKey: "k"})
+	llm, err := NewModel(t.Context(), "m", &Config{APIKey: "k"})
 	if err != nil {
 		t.Fatalf("NewModel() err = %v", err)
 	}
@@ -138,7 +137,7 @@ func TestHTTPOptionsHeadersNeverReachTheWire(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = fmt.Fprint(w, completedBody)
 			})
-			llm, err := NewModel(t.Context(), "gpt-4o-mini", &ClientConfig{
+			llm, err := NewModel(t.Context(), "gpt-4o-mini", &Config{
 				APIKey:     "real-key",
 				BaseURL:    server.URL + "/v1",
 				HTTPClient: server.Client(),
@@ -189,7 +188,7 @@ const completedBody = `{"id":"r","object":"response","status":"completed",` +
 	`"content":[{"type":"output_text","text":"hi","annotations":[]}]}]}`
 
 // TestNewModel_UsesTheConfiguredClient pins that NewModel hands
-// ClientConfig.HTTPClient and ClientConfig.Options to the SDK. The configured
+// Config.HTTPClient and Config.Options to the SDK. The configured
 // client answers in memory, while BaseURL points at a server that fails every
 // request, so a model built on the default client gets the failure instead.
 func TestNewModel_UsesTheConfiguredClient(t *testing.T) {
@@ -210,7 +209,7 @@ func TestNewModel_UsesTheConfiguredClient(t *testing.T) {
 				Request:    r,
 			}, nil
 		})}
-		llm, err := NewModel(t.Context(), "gpt-4o-mini", &ClientConfig{
+		llm, err := NewModel(t.Context(), "gpt-4o-mini", &Config{
 			APIKey:     "test",
 			BaseURL:    server.URL + "/v1",
 			HTTPClient: client,
@@ -226,10 +225,10 @@ func TestNewModel_UsesTheConfiguredClient(t *testing.T) {
 			}
 		}
 		if !used {
-			t.Error("the request did not go through ClientConfig.HTTPClient")
+			t.Error("the request did not go through Config.HTTPClient")
 		}
 		if optionHeader != "set" {
-			t.Errorf("X-Adk-Option = %q, want the header ClientConfig.Options set", optionHeader)
+			t.Errorf("X-Adk-Option = %q, want the header Config.Options set", optionHeader)
 		}
 	})
 }

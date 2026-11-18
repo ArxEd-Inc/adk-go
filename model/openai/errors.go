@@ -22,8 +22,6 @@ import "google.golang.org/adk/v2/model/openai/internal/shared"
 var (
 	// ErrModelNameRequired is returned when a model name is not provided.
 	ErrModelNameRequired = shared.ErrModelNameRequired
-	// ErrUnsupportedAPI is returned when ClientConfig.API names an API this package does not implement.
-	ErrUnsupportedAPI = shared.ErrUnsupportedAPI
 	// ErrNoChoices is returned when a Chat Completions response carries no choices.
 	ErrNoChoices = shared.ErrNoChoices
 	// ErrRequestNil is returned when the provided request is nil.

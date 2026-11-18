@@ -68,17 +68,16 @@
 // into context, a compacted transcript, or a memory recall all arrive with the
 // thought marker gone, and reach every model package alike.
 //
-// Clients construct a ClientConfig and pass it to NewModel:
+// Clients construct a Config and pass it to NewModel:
 //
 //	ctx := context.Background()
-//	cfg := &openai.ClientConfig{APIKey: os.Getenv("OPENAI_API_KEY")}
+//	cfg := &openai.Config{APIKey: apiKey, Effort: openai.EffortHigh}
 //	llm, err := openai.NewModel(ctx, "gpt-4o-mini", cfg)
 //	if err != nil {
 //		log.Fatal(err)
 //	}
 //
-// Setting BaseURL points the model at another OpenAI-compatible provider that
-// serves the Responses API. Make sure APIKey is non-empty when BaseURL points
-// at another provider. The OpenAI client falls back to the OPENAI_API_KEY
-// environment variable when it is empty, and would send that key to BaseURL.
+// The API key is required: the package never reads OPENAI_API_KEY from the
+// environment. Setting BaseURL points the model at another server that
+// implements the Responses API.
 package openai

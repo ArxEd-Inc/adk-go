@@ -23,6 +23,7 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	oairesponses "github.com/openai/openai-go/v3/responses"
+	oaishared "github.com/openai/openai-go/v3/shared"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
@@ -38,6 +39,22 @@ import (
 type Model struct {
 	client *openai.Client
 	name   string
+	opts   Options
+}
+
+// Options carries the model-wide settings openai.Config translates into, each
+// applied to every request the model sends.
+type Options struct {
+	// Effort, when set, is the reasoning effort of every request, in place of
+	// the one a request's ThinkingConfig resolves to.
+	Effort oaishared.ReasoningEffort
+
+	// DefaultMaxTokens caps the output of a request that sets no
+	// MaxOutputTokens of its own. Zero leaves such a request uncapped.
+	DefaultMaxTokens int64
+
+	// PromptCaching places explicit prompt cache breakpoints; nil places none.
+	PromptCaching *shared.PromptCachingConfig
 }
 
 // Name returns the model name a request is sent with when it does not name
@@ -50,7 +67,7 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 	if req == nil {
 		return shared.SingleErrorSequence(shared.ErrRequestNil)
 	}
-	params, err := buildParams(m.name, req)
+	params, err := buildParamsWith(m.name, req, m.opts)
 	if err != nil {
 		return shared.SingleErrorSequence(err)
 	}
@@ -574,7 +591,8 @@ func attachMetadata(resp *model.LLMResponse, openaiResp *oairesponses.Response) 
 	resp.CustomMetadata["openai_model"] = openaiResp.Model
 }
 
-// New returns a Model talking to the Responses API as modelName.
-func New(client *openai.Client, modelName string) *Model {
-	return &Model{client: client, name: modelName}
+// New returns a Model talking to the Responses API as modelName, applying
+// opts to every request.
+func New(client *openai.Client, modelName string, opts Options) *Model {
+	return &Model{client: client, name: modelName, opts: opts}
 }

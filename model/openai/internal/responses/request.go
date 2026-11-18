@@ -33,21 +33,38 @@ import (
 )
 
 // buildParams converts a generic LLMRequest into the OpenAI-specific
-// oairesponses.ResponseNewParams format, preparing it for an API call.
+// oairesponses.ResponseNewParams format, preparing it for an API call, with no
+// model-wide options.
 func buildParams(modelName string, req *model.LLMRequest) (oairesponses.ResponseNewParams, error) {
+	return buildParamsWith(modelName, req, Options{})
+}
+
+// buildParamsWith is buildParams applying the model-wide options a Model
+// carries.
+func buildParamsWith(modelName string, req *model.LLMRequest, opts Options) (oairesponses.ResponseNewParams, error) {
 	if req == nil {
 		return oairesponses.ResponseNewParams{}, shared.ErrRequestNil
 	}
 
 	params := oairesponses.ResponseNewParams{
 		Model: oaishared.ResponsesModel(modelName),
+		// Never stored: a conversation is resent whole on every request, so
+		// nothing needs the response kept, and an unstored request keeps no
+		// copy of what it carried beyond the provider's abuse-monitoring logs.
+		Store: param.NewOpt(false),
 	}
 	if req.Model != "" {
 		params.Model = oaishared.ResponsesModel(req.Model)
 	}
 
+	var contentOpts contentOptions
+	if opts.PromptCaching != nil && opts.PromptCaching.MarkedPart != nil {
+		contentOpts.markedPart = lastMarkedPart(req.Contents)
+		contentOpts.markedPartBreakpoint = opts.PromptCaching.MarkedPart
+	}
+
 	// We convert the generic content parts into OpenAI's input format.
-	input, droppedReasoning, err := convertContents(req.Contents)
+	input, droppedReasoning, err := convertContentsWith(req.Contents, contentOpts)
 	if err != nil {
 		return oairesponses.ResponseNewParams{}, err
 	}
@@ -91,13 +108,71 @@ func buildParams(modelName string, req *model.LLMRequest) (oairesponses.Response
 		}
 	}
 
+	if opts.Effort != "" {
+		params.Reasoning.Effort = opts.Effort
+	}
+	if !params.MaxOutputTokens.Valid() && opts.DefaultMaxTokens > 0 {
+		params.MaxOutputTokens = param.NewOpt(opts.DefaultMaxTokens)
+	}
+	if opts.PromptCaching != nil && opts.PromptCaching.SystemInstruction != nil && params.Instructions.Valid() {
+		moveInstructionsToDeveloperMessage(&params, opts.PromptCaching.SystemInstruction)
+	}
+
 	return params, nil
 }
 
-// convertContents converts contents into Responses API input items, reporting
-// separately whether any part was dropped as replayed reasoning. The caller
-// needs that to tell a request the drop emptied from one that arrived empty.
-func convertContents(contents []*genai.Content) (oairesponses.ResponseInputParam, bool, error) {
+// moveInstructionsToDeveloperMessage sends the request's instructions as its
+// first input item, a developer message whose text ends at the given
+// breakpoint, since the top-level instructions field cannot carry one. The
+// model reads a developer message first in the input as it reads the
+// instructions field.
+func moveInstructionsToDeveloperMessage(params *oairesponses.ResponseNewParams, bp *shared.CacheBreakpoint) {
+	text := oairesponses.ResponseInputTextParam{
+		Text:                  params.Instructions.Value,
+		PromptCacheBreakpoint: textBreakpoint(bp),
+	}
+	developer := oairesponses.ResponseInputItemUnionParam{OfMessage: &oairesponses.EasyInputMessageParam{
+		Role: oairesponses.EasyInputMessageRoleDeveloper,
+		Type: oairesponses.EasyInputMessageTypeMessage,
+		Content: oairesponses.EasyInputMessageContentUnionParam{
+			OfInputItemContentList: oairesponses.ResponseInputMessageContentListParam{{OfInputText: &text}},
+		},
+	}}
+	params.Input.OfInputItemList = append(oairesponses.ResponseInputParam{developer}, params.Input.OfInputItemList...)
+	params.Instructions = param.Opt[string]{}
+}
+
+// contentOptions configures convertContentsWith. The zero value places no
+// breakpoint.
+type contentOptions struct {
+	// markedPart is the part whose content block ends at
+	// markedPartBreakpoint; nil places no breakpoint.
+	markedPart           *genai.Part
+	markedPartBreakpoint *shared.CacheBreakpoint
+}
+
+// lastMarkedPart returns the last part of contents marked as the end of a
+// shared prefix, or nil when none is.
+func lastMarkedPart(contents []*genai.Content) *genai.Part {
+	var last *genai.Part
+	for _, content := range contents {
+		if content == nil {
+			continue
+		}
+		for _, part := range content.Parts {
+			if shared.IsCacheBreakpointMarked(part) {
+				last = part
+			}
+		}
+	}
+	return last
+}
+
+// convertContentsWith converts contents into Responses API input items,
+// reporting separately whether any part was dropped as replayed reasoning. The
+// caller needs that to tell a request the drop emptied from one that arrived
+// empty.
+func convertContentsWith(contents []*genai.Content, opts contentOptions) (oairesponses.ResponseInputParam, bool, error) {
 	var (
 		items            oairesponses.ResponseInputParam
 		tracker          shared.CallTracker
@@ -170,6 +245,7 @@ func convertContents(contents []*genai.Content) (oairesponses.ResponseInputParam
 			// part can carry both. A call and a response on the same part are
 			// still alternatives, and the response is dropped, as on main.
 			sendText := part.Text != "" && !part.Thought
+			before := len(buffered)
 			switch {
 			case sendText:
 				buffered = append(buffered, bufferedContent{text: part.Text})
@@ -193,6 +269,12 @@ func convertContents(contents []*genai.Content) (oairesponses.ResponseInputParam
 			// switch below, whose flush has to carry the media out with it.
 			for _, m := range media {
 				buffered = append(buffered, bufferedContent{media: &m})
+			}
+			if opts.markedPart != nil && part == opts.markedPart && len(buffered) > before {
+				// The part's own content ends where its last piece does. A
+				// marked part that buffered nothing, such as a function
+				// response, has no input content block to carry a breakpoint.
+				buffered[len(buffered)-1].breakpoint = opts.markedPartBreakpoint
 			}
 			switch {
 			case part.FunctionCall != nil:
@@ -238,6 +320,8 @@ func convertContents(contents []*genai.Content) (oairesponses.ResponseInputParam
 type bufferedContent struct {
 	text  string
 	media *shared.Media
+	// breakpoint, when set, ends a prompt cache breakpoint at this piece.
+	breakpoint *shared.CacheBreakpoint
 }
 
 // imageInputDetail is the detail level every image input carries.
@@ -266,6 +350,7 @@ func newMessage(msgRole oairesponses.EasyInputMessageRole, buffered []bufferedCo
 			if err != nil {
 				return nil, err
 			}
+			setBreakpoint(&content, b.breakpoint)
 			contentList = append(contentList, content)
 			continue
 		}
@@ -276,9 +361,9 @@ func newMessage(msgRole oairesponses.EasyInputMessageRole, buffered []bufferedCo
 			Text: b.text,
 			Type: constant.InputText("input_text"),
 		}
-		contentList = append(contentList, oairesponses.ResponseInputContentUnionParam{
-			OfInputText: &textParam,
-		})
+		content := oairesponses.ResponseInputContentUnionParam{OfInputText: &textParam}
+		setBreakpoint(&content, b.breakpoint)
+		contentList = append(contentList, content)
 	}
 	if len(contentList) == 0 {
 		return nil, nil
@@ -290,6 +375,34 @@ func newMessage(msgRole oairesponses.EasyInputMessageRole, buffered []bufferedCo
 			OfInputItemContentList: contentList,
 		},
 	}, nil
+}
+
+// setBreakpoint ends a prompt cache breakpoint at content; a nil bp sets none.
+func setBreakpoint(content *oairesponses.ResponseInputContentUnionParam, bp *shared.CacheBreakpoint) {
+	if bp == nil {
+		return
+	}
+	// Built with the SDK's constructors, which set the constant mode: a
+	// breakpoint whose fields are all zero is omitted from the request.
+	switch {
+	case content.OfInputText != nil:
+		content.OfInputText.PromptCacheBreakpoint = textBreakpoint(bp)
+	case content.OfInputImage != nil:
+		image := oairesponses.NewResponseInputImagePromptCacheBreakpointParam()
+		image.Ttl = string(bp.TTL)
+		content.OfInputImage.PromptCacheBreakpoint = image
+	case content.OfInputFile != nil:
+		file := oairesponses.NewResponseInputFilePromptCacheBreakpointParam()
+		file.Ttl = string(bp.TTL)
+		content.OfInputFile.PromptCacheBreakpoint = file
+	}
+}
+
+// textBreakpoint is bp as an input_text block's breakpoint.
+func textBreakpoint(bp *shared.CacheBreakpoint) oairesponses.ResponseInputTextPromptCacheBreakpointParam {
+	text := oairesponses.NewResponseInputTextPromptCacheBreakpointParam()
+	text.Ttl = string(bp.TTL)
+	return text
 }
 
 // newMediaContent puts one classified media value in the content field the

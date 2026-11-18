@@ -143,7 +143,7 @@ func TestBuildParams_MultiTurnAssistantUsesOutputText(t *testing.T) {
 }
 
 // TestBuildParams_ItemOrdering pins the order in which a model turn's
-// parts become input items. Text is buffered and flushed by convertContents
+// parts become input items. Text is buffered and flushed by convertContentsWith
 // immediately before a function call or response is appended; dropping that
 // flush does not lose the text but does emit it after the call, silently
 // reordering the history. Assistant text became a third item kind with the
@@ -834,7 +834,7 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 		},
 		{
 			// buildContentsDefault filters these out upstream, so this is the
-			// contract for a caller reaching convertContents directly: an
+			// contract for a caller reaching convertContentsWith directly: an
 			// empty part is reported, not quietly skipped.
 			name: "empty_part_is_reported",
 			contents: []*genai.Content{
@@ -1323,7 +1323,7 @@ func TestReplayedReasoning(t *testing.T) {
 	}{
 		{"nil_part", nil, false},
 		// Nothing marks these as reasoning, so there is no reason to drop
-		// them: convertContents reports them instead.
+		// them: convertContentsWith reports them instead.
 		{"empty_part", &genai.Part{}, false},
 		{"metadata_only", &genai.Part{PartMetadata: map[string]any{"src": "a"}}, false},
 		{"thought_text", &genai.Part{Text: "scratch", Thought: true}, true},

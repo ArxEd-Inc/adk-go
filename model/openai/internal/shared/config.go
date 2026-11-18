@@ -48,14 +48,14 @@ func RequestTimeout(cfg *genai.GenerateContentConfig) time.Duration {
 // to OpenAI, while refusing one would break the configs model/gemini fills in
 // itself.
 //
-// Headers meant for OpenAI belong on ClientConfig.Options, which is scoped to
+// Headers meant for OpenAI belong on Config.Options, which is scoped to
 // the one backend that sees them.
 var IgnoredHTTPOptionFields = []string{"Headers"}
 
 // SupportedHTTPOptionFields names the HTTPOptions fields both endpoints
 // support: Timeout, which RequestTimeout extracts. Any other field outside
 // IgnoredHTTPOptionFields is refused, including fields genai adds after this
-// list; those it has today belong to ClientConfig (BaseURL, APIVersion), shape a
+// list; those it has today belong to Config (BaseURL, APIVersion), shape a
 // Gemini body (ExtraBody), or set a retry schedule openai-go already owns.
 var SupportedHTTPOptionFields = []string{"Timeout"}
 

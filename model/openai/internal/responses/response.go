@@ -269,9 +269,9 @@ func truncated(resp *oairesponses.Response, incompleteEvent bool) bool {
 		// A finished turn carries incomplete_details as null.
 		return resp.JSON.IncompleteDetails.Valid()
 	default:
-		// failed, cancelled, incomplete, in_progress and queued all describe an //nolint:misspell
-		// unfinished turn. Enumerating the finished states instead keeps a
-		// status added later from defaulting to a clean stop.
+		// failed, the canceled status, incomplete, in_progress and queued all
+		// describe an unfinished turn. Enumerating the finished states instead
+		// keeps a status added later from defaulting to a clean stop.
 		return true
 	}
 }

@@ -19,8 +19,6 @@ import "errors"
 var (
 	// ErrModelNameRequired is returned when a model name is not provided.
 	ErrModelNameRequired = errors.New("openai: model name is required")
-	// ErrUnsupportedAPI is returned when ClientConfig.API names an API this package does not implement.
-	ErrUnsupportedAPI = errors.New("openai: unsupported API")
 	// ErrNoChoices is returned when a Chat Completions response carries no choices.
 	ErrNoChoices = errors.New("openai: response included no choices")
 	// ErrRequestNil is returned when the provided request is nil.
