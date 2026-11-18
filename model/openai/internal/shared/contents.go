@@ -61,11 +61,11 @@ func FlattenContentText(content *genai.Content) (string, error) {
 }
 
 // ReplayedReasoning reports whether part is reasoning carried over from an
-// earlier turn that carries nothing else, so dropping it loses nothing: the
-// Responses API accepts reasoning back only as an input item referencing the
-// id that produced it, an id ADK does not carry, and Chat Completions has no
-// field for it, so sent as assistant text it would read as words the model
-// never said.
+// earlier turn that carries nothing else, so dropping it loses nothing. The
+// Responses API accepts reasoning back only as a reasoning input item, so sent
+// as assistant text it would read as words the model never said. The Responses
+// converter sends back the items it can, those whose part carries one in its
+// signature, before consulting this; every other replayed thought is dropped.
 //
 // Whether to send a part's text is decided by part.Thought alone, because a
 // part can carry both reasoning text and a call, and the call must survive.

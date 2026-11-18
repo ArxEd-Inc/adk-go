@@ -1007,7 +1007,7 @@ func TestConvertOutputItems(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			parts, err := convertOutputItems(tc.items)
+			parts, err := convertOutputItems("", tc.items)
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("convertOutputItems() error = %v, wantErr %v", err, tc.wantErr)
 			}

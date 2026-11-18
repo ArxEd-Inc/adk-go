@@ -58,15 +58,25 @@
 // for unsupported output items, unsupported message content, or invalid
 // function-call arguments. The event contains only an "error.type" category.
 //
-// Model reasoning is reported to the caller as thought parts. Reasoning is not
-// sent back on a later turn: the Responses API accepts it only as an input
-// item referencing the id of the item that produced it, which ADK does not
-// carry. Reasoning therefore informs the turn that produced it and no other; a
-// caller that needs a conclusion to survive should have the model state it in
-// the answer. What this package cannot police is reasoning that something
-// upstream has already rendered as ordinary text: a peer agent's reply folded
-// into context, a compacted transcript, or a memory recall all arrive with the
-// thought marker gone, and reach every model package alike.
+// Model reasoning is reported to the caller as thought parts. Every request
+// asks for its reasoning encrypted, and a reasoning item's id and encrypted
+// content ride on the ThoughtSignature of the item's first thought part,
+// behind [ReasoningSignaturePrefix]; an item that came with no text still
+// yields one empty thought part to carry them. A later request sends the item
+// back as an input item, ahead of the output items that followed it, so the
+// model picks its reasoning up across tool calls instead of starting over. An
+// item goes back only to the model that produced it, and only while one of the
+// items that followed it is still in the turn; otherwise it is dropped, as are
+// thoughts other providers wrote. A streamed turn carries its items when its
+// terminal response restates what streamed, which OpenAI's does; a turn whose
+// terminal response does not keeps its thoughts unsigned, and its reasoning is
+// not sent back. The phase of an assistant message (commentary or final
+// answer) rides the same way on its text parts and is sent back with them.
+//
+// What this package cannot police is reasoning that something upstream has
+// already rendered as ordinary text: a peer agent's reply folded into context,
+// a compacted transcript, or a memory recall all arrive with the thought
+// marker gone, and reach every model package alike.
 //
 // Clients construct a Config and pass it to NewModel:
 //

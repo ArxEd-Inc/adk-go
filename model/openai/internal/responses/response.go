@@ -100,7 +100,7 @@ func failedResponseError(resp *oairesponses.Response) error {
 }
 
 func buildCandidate(resp *oairesponses.Response) (*genai.Candidate, error) {
-	parts, err := convertOutputItems(resp.Output)
+	parts, err := convertOutputItems(string(resp.Model), resp.Output)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +121,14 @@ func buildCandidate(resp *oairesponses.Response) (*genai.Candidate, error) {
 // types of output items, such as messages (text, refusal), function calls,
 // and reasoning (thoughts and summaries), extracting the relevant information
 // for each.
-func convertOutputItems(items []oairesponses.ResponseOutputItemUnion) ([]*genai.Part, error) {
+//
+// A reasoning item's id and encrypted content ride on the ThoughtSignature of
+// its first thought part, so the item can be sent back on a later turn. An
+// item that came with no text still yields one thought part, with empty text,
+// to carry them. modelName is the model the response reports, recorded so the
+// item is replayed only to a model that can read it. An assistant message's
+// phase rides the same way on its text parts.
+func convertOutputItems(modelName string, items []oairesponses.ResponseOutputItemUnion) ([]*genai.Part, error) {
 	if len(items) == 0 {
 		return nil, shared.ErrNoOutputItems
 	}
@@ -129,14 +136,15 @@ func convertOutputItems(items []oairesponses.ResponseOutputItemUnion) ([]*genai.
 	for _, item := range items {
 		switch item.Type {
 		case "message":
+			phase := phaseSignature(item.Phase)
 			for _, content := range item.Content {
 				switch content.Type {
 				case "output_text":
 					if content.Text != "" {
-						parts = append(parts, &genai.Part{Text: content.Text})
+						parts = append(parts, &genai.Part{Text: content.Text, ThoughtSignature: phase})
 					}
 				case "refusal":
-					parts = append(parts, &genai.Part{Text: content.Refusal})
+					parts = append(parts, &genai.Part{Text: content.Refusal, ThoughtSignature: phase})
 				default:
 					return nil, fmt.Errorf("%w: %q", shared.ErrUnsupportedMessageContentType, content.Type)
 				}
@@ -148,6 +156,7 @@ func convertOutputItems(items []oairesponses.ResponseOutputItemUnion) ([]*genai.
 			}
 			parts = append(parts, part)
 		case "reasoning":
+			first := len(parts)
 			for _, chunk := range item.Content {
 				if chunk.Text != "" {
 					parts = append(parts, &genai.Part{Text: chunk.Text, Thought: true})
@@ -158,6 +167,12 @@ func convertOutputItems(items []oairesponses.ResponseOutputItemUnion) ([]*genai.
 				if summary.Text != "" {
 					parts = append(parts, &genai.Part{Text: summary.Text, Thought: true})
 				}
+			}
+			if signature := reasoningSignature(modelName, item); signature != nil {
+				if len(parts) == first {
+					parts = append(parts, &genai.Part{Thought: true})
+				}
+				parts[first].ThoughtSignature = signature
 			}
 		default:
 			return nil, fmt.Errorf("%w: %q", shared.ErrUnsupportedOutputItemType, item.Type)

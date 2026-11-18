@@ -57,7 +57,7 @@ func buildParamsWith(modelName string, req *model.LLMRequest, opts Options) (oai
 		params.Model = oaishared.ResponsesModel(req.Model)
 	}
 
-	var contentOpts contentOptions
+	contentOpts := contentOptions{modelName: string(params.Model)}
 	if opts.PromptCaching != nil && opts.PromptCaching.MarkedPart != nil {
 		contentOpts.markedPart = lastMarkedPart(req.Contents)
 		contentOpts.markedPartBreakpoint = opts.PromptCaching.MarkedPart
@@ -108,6 +108,10 @@ func buildParamsWith(modelName string, req *model.LLMRequest, opts Options) (oai
 		}
 	}
 
+	// Unstored reasoning comes back only encrypted, and only when asked for.
+	// It is what a later turn sends back so the model can pick up its
+	// reasoning instead of starting over (see convertContentsWith).
+	params.Include = append(params.Include, oairesponses.ResponseIncludableReasoningEncryptedContent)
 	if opts.Effort != "" {
 		params.Reasoning.Effort = opts.Effort
 	}
@@ -145,6 +149,10 @@ func moveInstructionsToDeveloperMessage(params *oairesponses.ResponseNewParams, 
 // contentOptions configures convertContentsWith. The zero value places no
 // breakpoint.
 type contentOptions struct {
+	// modelName is the model the request goes to. A reasoning item is sent
+	// back only to the model that produced it.
+	modelName string
+
 	// markedPart is the part whose content block ends at
 	// markedPartBreakpoint; nil places no breakpoint.
 	markedPart           *genai.Part
@@ -218,9 +226,24 @@ func convertContentsWith(contents []*genai.Content, opts contentOptions) (oaires
 			continue
 		}
 		curRole = genai.Role(content.Role)
-		for _, part := range content.Parts {
+		for i, part := range content.Parts {
 			if part == nil {
 				continue
+			}
+			// A reasoning item this package carried out of an earlier turn
+			// goes back as an input item ahead of the output items that
+			// followed it. One that cannot go back is dropped below with every
+			// other replayed thought.
+			if part.Thought && curRole == genai.RoleModel {
+				if payload, ok := decodeReasoningSignature(part.ThoughtSignature); ok &&
+					replayableReasoning(payload, opts.modelName, content.Parts, i) &&
+					shared.UnsupportedPayload(part) == "" && part.FunctionCall == nil && part.FunctionResponse == nil {
+					if err := flushText(); err != nil {
+						return nil, false, err
+					}
+					items = append(items, reasoningInputItem(payload))
+					continue
+				}
 			}
 			// Reported before anything is emitted, so that a field this
 			// package cannot send is named even when text or a call rides on
@@ -248,7 +271,18 @@ func convertContentsWith(contents []*genai.Content, opts contentOptions) (oaires
 			before := len(buffered)
 			switch {
 			case sendText:
-				buffered = append(buffered, bufferedContent{text: part.Text})
+				var phase oairesponses.ResponseOutputMessagePhase
+				if curRole == genai.RoleModel {
+					phase = decodePhaseSignature(part.ThoughtSignature)
+					// One message states one phase, so text of another phase
+					// starts a message of its own.
+					if n := len(buffered); n > 0 && buffered[n-1].phase != phase {
+						if err := flushText(); err != nil {
+							return nil, false, err
+						}
+					}
+				}
+				buffered = append(buffered, bufferedContent{text: part.Text, phase: phase})
 			case part.Text != "" || shared.ReplayedReasoning(part):
 				// Dropping reasoning must not hide a bad role, so the check
 				// still runs. The drop counts toward the emptied-request
@@ -322,6 +356,9 @@ type bufferedContent struct {
 	media *shared.Media
 	// breakpoint, when set, ends a prompt cache breakpoint at this piece.
 	breakpoint *shared.CacheBreakpoint
+	// phase is the phase of the assistant message the text came from, or ""
+	// when it stated none.
+	phase oairesponses.ResponseOutputMessagePhase
 }
 
 // imageInputDetail is the detail level every image input carries.
@@ -486,6 +523,8 @@ func newOutputMessage(buffered []bufferedContent) (*oairesponses.ResponseOutputM
 	return &oairesponses.ResponseOutputMessageParam{
 		Content: contentList,
 		Status:  oairesponses.ResponseOutputMessageStatusCompleted,
+		// Every piece of one buffer shares a phase; see convertContentsWith.
+		Phase: buffered[0].phase,
 	}, nil
 }
 
