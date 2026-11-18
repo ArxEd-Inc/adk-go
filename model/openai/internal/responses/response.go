@@ -181,6 +181,11 @@ func convertOutputItems(modelName string, items []oairesponses.ResponseOutputIte
 				}
 				parts[first].ThoughtSignature = signature
 			}
+			for _, part := range parts[first:] {
+				if len(part.ThoughtSignature) == 0 {
+					part.ThoughtSignature = []byte(plainThoughtSignature)
+				}
+			}
 		default:
 			// An item this package has no part for, such as a server-side
 			// tool's, is left out rather than failing a turn the model

@@ -264,3 +264,29 @@ func equalPayload(a, b reasoningPayload) bool {
 	return a.Model == b.Model && a.ID == b.ID && a.EncryptedContent == b.EncryptedContent &&
 		strings.Join(a.Summary, "\x00") == strings.Join(b.Summary, "\x00")
 }
+
+func TestReasoning_EveryThoughtIsMarked(t *testing.T) {
+	parts, err := convertOutputItems("gpt-test", []oairesponses.ResponseOutputItemUnion{
+		{Type: "reasoning", ID: "rs_1", EncryptedContent: "opaque-1", Summary: []oairesponses.ResponseReasoningItemSummary{
+			{Text: "Look the order up."}, {Text: "Then cancel it."},
+		}},
+		{Type: "message", Content: []oairesponses.ResponseOutputMessageContentUnion{{Type: "output_text", Text: "Done."}}},
+	})
+	if err != nil {
+		t.Fatalf("convertOutputItems() err = %v", err)
+	}
+	if _, ok := decodeReasoningSignature(parts[0].ThoughtSignature); !ok {
+		t.Errorf("parts[0] does not carry the reasoning item")
+	}
+	if string(parts[1].ThoughtSignature) != plainThoughtSignature {
+		t.Errorf("parts[1].ThoughtSignature = %q, want the plain marker", parts[1].ThoughtSignature)
+	}
+	if len(parts[2].ThoughtSignature) != 0 {
+		t.Errorf("the answer carries signature %q, want none", parts[2].ThoughtSignature)
+	}
+	for _, part := range parts[:2] {
+		if !strings.HasPrefix(string(part.ThoughtSignature), ThoughtSignaturePrefix) {
+			t.Errorf("thought %q is not marked as this package's", part.Text)
+		}
+	}
+}

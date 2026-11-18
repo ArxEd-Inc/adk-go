@@ -1995,7 +1995,7 @@ func TestModel_GenerateStream_NarrowerCompletedContentPreservesAggregate(t *test
 			want: &genai.Content{
 				Role: genai.RoleModel,
 				Parts: []*genai.Part{
-					{Text: "Weighing options", Thought: true},
+					{Text: "Weighing options", Thought: true, ThoughtSignature: []byte(plainThoughtSignature)},
 					{Text: "hello"},
 				},
 			},

@@ -31,6 +31,11 @@ import (
 	"google.golang.org/genai"
 )
 
+// OpenAIThoughtSignaturePrefix begins the ThoughtSignature of every thought part model/openai produces.
+// It is model/openai's ThoughtSignaturePrefix, repeated here so this package needs no import of
+// model/openai; a test in model/anthropic checks that the two agree.
+const OpenAIThoughtSignaturePrefix = "adk-openai-"
+
 // PartCacheBreakpointMetadataKey is the genai.Part.PartMetadata key that marks a
 // part as a prompt-cache breakpoint candidate: a true value under it asks the
 // model to place a cache_control marker on the content block the part converts
@@ -318,6 +323,14 @@ func partToContentBlocks(
 	opts ContentsOptions,
 ) ([]anthropic.ContentBlockParamUnion, error) {
 	if part == nil {
+		return nil, nil
+	}
+
+	// A thought model/openai produced, in a conversation that moved from an OpenAI model to Claude: its
+	// signature and the reasoning behind it mean nothing to Anthropic, which would reject it as a thinking
+	// block's signature, so it is dropped. Checked before the branches below, which would otherwise send it
+	// as a signed thinking block or fail it as unreplayable.
+	if part.Thought && bytes.HasPrefix(part.ThoughtSignature, []byte(OpenAIThoughtSignaturePrefix)) {
 		return nil, nil
 	}
 

@@ -106,8 +106,10 @@
 // items that followed it is still in the turn; otherwise it is dropped, as are
 // thoughts other providers wrote. A streamed turn carries its items when its
 // terminal response restates what streamed, which OpenAI's does; a turn whose
-// terminal response does not keeps its thoughts unsigned, and its reasoning is
-// not sent back. The phase of an assistant message (commentary or final
+// terminal response does not keeps its thoughts without the items, and its
+// reasoning is not sent back. Every thought part this package produces has a
+// signature beginning with [ThoughtSignaturePrefix], so another provider's
+// package can leave it out of its requests. The phase of an assistant message (commentary or final
 // answer) rides the same way on its text parts and is sent back with them.
 //
 // What this package cannot police is reasoning that something upstream has

@@ -16,8 +16,13 @@ package openai
 
 import "google.golang.org/adk/v2/model/openai/internal/responses"
 
+// ThoughtSignaturePrefix begins the ThoughtSignature of every thought part this
+// package produces. Another provider's model package can recognize such a
+// part by it and leave the part out of its own requests, since neither the
+// signature nor the reasoning behind it means anything to that provider.
+const ThoughtSignaturePrefix = responses.ThoughtSignaturePrefix
+
 // ReasoningSignaturePrefix begins the ThoughtSignature of a thought part that
-// carries an OpenAI reasoning item for replay. Another provider's model
-// package can recognize such a part by it and leave the part out of its own
-// requests, since the signature means nothing to that provider.
+// carries an OpenAI reasoning item for replay. It begins with
+// ThoughtSignaturePrefix.
 const ReasoningSignaturePrefix = responses.ReasoningSignaturePrefix

@@ -24,17 +24,28 @@ import (
 	"google.golang.org/genai"
 )
 
+// ThoughtSignaturePrefix begins the ThoughtSignature of every thought part
+// this package produces, so another provider's model package can recognize
+// such a part and leave it out of its own requests.
+const ThoughtSignaturePrefix = "adk-openai-"
+
+// plainThoughtSignature is the signature of a thought part that carries no
+// reasoning item: a reasoning item's later parts, whose first part carries the
+// item, and a streamed turn's thoughts when its terminal response did not
+// restate what streamed.
+const plainThoughtSignature = ThoughtSignaturePrefix + "thought/v1"
+
 // ReasoningSignaturePrefix begins the ThoughtSignature of a thought part that
 // carries a reasoning item for replay. A reasoning item travels in the
 // signature rather than in PartMetadata because session stores persist the
 // signature and some drop the metadata. The prefix tells such a part from a
 // signature another provider wrote, which this package cannot replay and
 // another provider's package must not.
-const ReasoningSignaturePrefix = "adk-openai-reasoning/v1:"
+const ReasoningSignaturePrefix = ThoughtSignaturePrefix + "reasoning/v1:"
 
 // phaseSignaturePrefix begins the ThoughtSignature of an answer's text part
 // that carries the phase of the assistant message it came from.
-const phaseSignaturePrefix = "adk-openai-phase/v1:"
+const phaseSignaturePrefix = ThoughtSignaturePrefix + "phase/v1:"
 
 // reasoningPayload is what a reasoning item's signature holds: enough to send
 // the item back as an input item on a later turn.
@@ -145,4 +156,17 @@ var snapshotSuffix = regexp.MustCompile(`-\d{4}-\d{2}-\d{2}$`)
 // round, counts as coming from the same model.
 func baseModelName(name string) string {
 	return snapshotSuffix.ReplaceAllString(name, "")
+}
+
+// signThoughts gives every thought part of content that has no signature the
+// plain one, so no thought this package produces goes unmarked.
+func signThoughts(content *genai.Content) {
+	if content == nil {
+		return
+	}
+	for _, part := range content.Parts {
+		if part != nil && part.Thought && len(part.ThoughtSignature) == 0 {
+			part.ThoughtSignature = []byte(plainThoughtSignature)
+		}
+	}
 }

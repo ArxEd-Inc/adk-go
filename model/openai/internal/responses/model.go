@@ -566,6 +566,7 @@ func restoreUnstated(part *genai.Part, streamed *genai.FunctionCall, argsUsable,
 // stream never arrives: the error ends the turn in place of TurnComplete.
 func finalizeStreamResponse(final *model.LLMResponse, term terminalEvent) {
 	final.TurnComplete = true
+	signThoughts(final.Content)
 	if term.resp != nil {
 		attachMetadata(final, term.resp)
 		final.ModelVersion = string(term.resp.Model)

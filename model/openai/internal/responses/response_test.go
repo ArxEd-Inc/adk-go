@@ -963,8 +963,10 @@ func TestConvertOutputItems(t *testing.T) {
 						Args: map[string]any{},
 					},
 				},
-				{Text: "thought1", Thought: true},
-				{Text: "summary1", Thought: true},
+				// An item with no ID carries nothing to replay, but its
+				// thoughts are still marked as this package's.
+				{Text: "thought1", Thought: true, ThoughtSignature: []byte(plainThoughtSignature)},
+				{Text: "summary1", Thought: true, ThoughtSignature: []byte(plainThoughtSignature)},
 			},
 		},
 		{
