@@ -994,10 +994,15 @@ func TestModel_GenerateStream_OutputlessTerminalEventKeepsTheReason(t *testing.T
 		t.Errorf("final FinishReason = %q, want %q", final.FinishReason, genai.FinishReasonMaxTokens)
 	}
 
-	// With nothing in the aggregator either, there is no turn to report and the
-	// call fails the way blocking does on the same body.
-	if _, err := runStream(t, evCreated, evMaxTokens); !errors.Is(err, shared.ErrNoOutputItems) {
-		t.Errorf("streaming err = %v, want %v", err, shared.ErrNoOutputItems)
+	// With nothing in the aggregator either, the cap still ended the turn, so
+	// it is reported as an empty MAX_TOKENS turn rather than as an error a
+	// caller would retry; see TestModel_GenerateStream_CapStopWithNothingIsATruncatedTurn.
+	empty, err := runStream(t, evCreated, evMaxTokens)
+	if err != nil {
+		t.Fatalf("streaming err = %v, want an empty truncated turn", err)
+	}
+	if final := empty[len(empty)-1]; final.FinishReason != genai.FinishReasonMaxTokens {
+		t.Errorf("final FinishReason = %q, want %q", final.FinishReason, genai.FinishReasonMaxTokens)
 	}
 }
 

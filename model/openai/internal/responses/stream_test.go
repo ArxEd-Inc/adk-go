@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	oairesponses "github.com/openai/openai-go/v3/responses"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/llminternal"
 
@@ -208,5 +209,21 @@ func TestStreamTranslator_ResponseFailed_PathsAgree(t *testing.T) {
 				t.Errorf("paths disagree:\n stream   = %q\n blocking = %q", streamErr, blockErr)
 			}
 		})
+	}
+}
+
+// TestModel_GenerateStream_CapStopWithNothingIsATruncatedTurn pins that a turn
+// the output cap ended before any output reports MAX_TOKENS on an empty turn,
+// as a turn cut after some output does, rather than an error.
+func TestModel_GenerateStream_CapStopWithNothingIsATruncatedTurn(t *testing.T) {
+	responses, err := runStream(t,
+		`{"type":"response.incomplete","response":{"id":"r","model":"m","status":"incomplete",`+
+			`"incomplete_details":{"reason":"max_output_tokens"},"output":[]}}`)
+	if err != nil {
+		t.Fatalf("runStream() err = %v, want a truncated turn", err)
+	}
+	final := responses[len(responses)-1]
+	if final.FinishReason != genai.FinishReasonMaxTokens || !final.TurnComplete || final.ErrorCode != "" {
+		t.Errorf("final = %+v, want MAX_TOKENS, complete, with no error code", final)
 	}
 }

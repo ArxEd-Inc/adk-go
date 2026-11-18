@@ -247,6 +247,14 @@ func (m *Model) generateStream(ctx context.Context, params oairesponses.Response
 				// turn: report it with the reason the event carries rather than
 				// failing a call the model answered. A truncated turn is
 				// exactly the shape that arrives with no output.
+			case final == nil && shared.IsEmptyOutput(err) &&
+				finishReason(term.resp, term.incomplete) == genai.FinishReasonMaxTokens:
+				// The output cap ended the turn before it produced anything.
+				// That is a turn cut short, reported as one, MAX_TOKENS on an
+				// empty turn, the same way a turn the cap cut after some output
+				// is, rather than as an error a caller would read as a failure
+				// to retry: the same request meets the same cap.
+				final = &model.LLMResponse{Content: &genai.Content{Role: string(genai.RoleModel)}}
 			default:
 				// Blocking fails the call on unusable output; match it rather
 				// than pass an empty turn off as a successful one.
