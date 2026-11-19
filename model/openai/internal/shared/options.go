@@ -43,13 +43,20 @@ type CacheBreakpoint struct {
 
 // PromptCachingConfig places explicit prompt cache breakpoints.
 //
-// The API's implicit mode stays on: it writes one breakpoint at the end of
-// the latest user message, tool-response group or initial developer group,
-// which covers a conversation's tail on every request. The breakpoints here
-// cover the two shared-prefix points implicit mode never writes. A request can
-// write at most four breakpoints, the implicit one included, so the two here
-// never exceed it.
+// Unless ExplicitOnly is set, the API's implicit mode stays on: it writes one
+// breakpoint at the end of the latest user message, tool-response group or
+// initial developer group, which covers a conversation's tail on every
+// request. The breakpoints here cover the two shared-prefix points implicit
+// mode never writes. A request can write at most four breakpoints, the
+// implicit one included, so the two here never exceed it.
 type PromptCachingConfig struct {
+	// ExplicitOnly sends every request in the API's explicit cache mode, in
+	// which it places no implicit breakpoint and writes only the breakpoints
+	// configured here. With no breakpoint configured, requests are not cached
+	// at all: for a one-shot prompt nothing later reads, where a cache write
+	// would only add its premium over the input price.
+	ExplicitOnly bool
+
 	// SystemInstruction places a breakpoint at the end of the system
 	// instruction, caching the tools and the instruction for every
 	// conversation that shares them. The API takes no breakpoint on its

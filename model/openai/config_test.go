@@ -209,6 +209,56 @@ func TestRequest_SystemInstructionBreakpoint(t *testing.T) {
 	})
 }
 
+func TestRequest_ExplicitOnlyCaching(t *testing.T) {
+	req := userText("Summarize order 42's history.")
+	req.Config = &genai.GenerateContentConfig{
+		SystemInstruction: genai.NewContentFromText("You summarize orders.", genai.RoleUser),
+	}
+
+	t.Run("by default the request leaves the cache mode to the API", func(t *testing.T) {
+		body := sendAndCapture(t, Config{}, req)
+		if got, ok := body["prompt_cache_options"]; ok {
+			t.Errorf("prompt_cache_options = %v, want absent", got)
+		}
+	})
+
+	t.Run("with no breakpoint the request is sent uncached", func(t *testing.T) {
+		body := sendAndCapture(t, Config{PromptCaching: &PromptCachingConfig{ExplicitOnly: true}}, req)
+		want := map[string]any{"mode": "explicit"}
+		if got, _ := body["prompt_cache_options"].(map[string]any); !equalJSON(got, want) {
+			t.Errorf("prompt_cache_options = %v, want %v", got, want)
+		}
+		if got := body["instructions"]; got != "You summarize orders." {
+			t.Errorf("instructions = %v, want the system instruction, top-level", got)
+		}
+		input, _ := body["input"].([]any)
+		for _, item := range input {
+			content, _ := item.(map[string]any)["content"].([]any)
+			for _, block := range content {
+				if got, ok := block.(map[string]any)["prompt_cache_breakpoint"]; ok {
+					t.Errorf("content block carries prompt_cache_breakpoint %v, want none", got)
+				}
+			}
+		}
+	})
+
+	t.Run("with a breakpoint only the configured one is written", func(t *testing.T) {
+		body := sendAndCapture(t, Config{PromptCaching: &PromptCachingConfig{
+			ExplicitOnly:      true,
+			SystemInstruction: &CacheBreakpoint{},
+		}}, req)
+		want := map[string]any{"mode": "explicit"}
+		if got, _ := body["prompt_cache_options"].(map[string]any); !equalJSON(got, want) {
+			t.Errorf("prompt_cache_options = %v, want %v", got, want)
+		}
+		input, _ := body["input"].([]any)
+		first, _ := input[0].(map[string]any)
+		if first["role"] != "developer" {
+			t.Errorf("input[0].role = %v, want the developer message carrying the breakpoint", first["role"])
+		}
+	})
+}
+
 func TestRequest_MarkedPartBreakpoint(t *testing.T) {
 	newRequest := func() *model.LLMRequest {
 		first := genai.NewPartFromText("Catalog page 1")

@@ -136,6 +136,9 @@ func buildParamsFor(modelName string, req *model.LLMRequest, opts Options, fileI
 	if opts.PromptCaching != nil && opts.PromptCaching.SystemInstruction != nil && params.Instructions.Valid() {
 		moveInstructionsToDeveloperMessage(&params, opts.PromptCaching.SystemInstruction)
 	}
+	if opts.PromptCaching != nil && opts.PromptCaching.ExplicitOnly {
+		params.PromptCacheOptions = oairesponses.ResponseNewParamsPromptCacheOptions{Mode: "explicit"}
+	}
 
 	return params, nil
 }
